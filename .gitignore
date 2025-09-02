@@ -1,0 +1,74 @@
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Editors / IDE ----------
+.vs/
+# VS Code：保留几份常用配置，其它忽略
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# ---------- CMake (建议全部用 out-of-source 构建) ----------
+/out/
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+install_manifest.txt
+cmake_install.cmake
+Makefile
+# Ninja
+.ninja_deps
+.ninja_log
+
+# ---------- MSVC / MSBuild 中间产物 ----------
+*.obj
+*.iobj
+*.pdb
+*.ipdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.log
+*.tlog
+*.lastbuildstate
+*.cache
+*.pch
+*.rsp
+*.tmp
+*.user
+*.opendb
+*.VC.db
+
+# ---------- vcpkg（如果项目内本地安装的话） ----------
+/vcpkg_installed/
+/installed/
+/packages/
+/buildtrees/
+/downloads/
+/.vcpkg-root
+/.cmake/vcpkg
+
+# ---------- bgfx 着色器二进制（源文件 *.sc 要保留） ----------
+shaders/**/*.bin
+
+# ---------- Misc ----------
+*.swp
+*.swo
+*.bak
+*.orig
+*.tmp
+*.dmp
+*.rdc
+
+# ---------- 用户本机 CMake 预设 ----------
+CMakeUserPresets.json

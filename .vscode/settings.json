@@ -1,0 +1,7 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configurePreset": "vs2022-x64",
+  "cmake.buildPreset": "vs2022-x64-RWD",
+  "cmake.configureOnOpen": true,
+  "C_Cpp.errorSquiggles": "disabled"
+}

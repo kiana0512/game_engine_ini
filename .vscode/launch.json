@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "KEngine (CMake)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${command:cmake.launchTargetPath}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": ["--vk"]     // 这里可传 --vk / --gl / --d3d11
+    }
+  ]
+}
