@@ -35,14 +35,19 @@ add_subdirectory(extern/bgfx.cmake)
 file(GLOB KE_SOURCES
   src/*.cpp
   src/gfx/*.cpp
+  src/core/*.cpp  
 )
 add_executable(KEngine ${KE_SOURCES})
-target_include_directories(KEngine PRIVATE src)
+target_include_directories(KEngine PRIVATE
+ src
+ extern/stb 
+ extern/tinygltf         #  让 <tiny_gltf.h> 可见
+)
 
 target_link_libraries(KEngine PRIVATE
   SDL2::SDL2main SDL2::SDL2
   spdlog::spdlog fmt::fmt
-  bgfx bimg bx
+  bgfx bimg bx 
 )
 
 if(MSVC)
@@ -81,6 +86,7 @@ function(bgfx_shader_multi OUT NAME TYPE)
         --entry main
         --varyingdef ${SHADER_DIR}/varying.def.sc
         -i ${BGFX_SHADER_INCLUDE}
+        -i ${SHADER_DIR}
 
     DEPENDS ${SHADER_DIR}/${NAME}.sc ${SHADER_DIR}/varying.def.sc shaderc
     COMMENT "Compiling ${NAME}.sc -> dx11/${NAME}.bin"
@@ -97,6 +103,7 @@ function(bgfx_shader_multi OUT NAME TYPE)
                 --entry main
                 --varyingdef ${SHADER_DIR}/varying.def.sc
                 -i ${BGFX_SHADER_INCLUDE}
+                -i ${SHADER_DIR}
         DEPENDS ${SHADER_DIR}/${NAME}.sc ${SHADER_DIR}/varying.def.sc shaderc
         COMMENT "Generating shaders/spirv/${NAME}.bin"
         )
@@ -112,6 +119,7 @@ function(bgfx_shader_multi OUT NAME TYPE)
                 --entry main
                 --varyingdef ${SHADER_DIR}/varying.def.sc
                 -i ${BGFX_SHADER_INCLUDE}
+                -i ${SHADER_DIR}
         DEPENDS ${SHADER_DIR}/${NAME}.sc ${SHADER_DIR}/varying.def.sc shaderc
         COMMENT "Generating shaders/glsl/${NAME}.bin"
         )
@@ -124,27 +132,100 @@ function(bgfx_shader_multi OUT NAME TYPE)
   set(${OUT} "${_outs}" PARENT_SCOPE)
 endfunction()
 
+# --- 新增：带自定义 varying 的编译函数 ---
+# --- 单一函数：带自定义 varying 的多后端编译 ---
+function(bgfx_shader_multi_with_varying OUT NAME TYPE VARYING_FILE)
+  # DX11
+  add_custom_command(
+    OUTPUT ${SHADER_OUT}/dx11/${NAME}.bin
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}/dx11
+    COMMAND $<TARGET_FILE:shaderc>
+            -f ${SHADER_DIR}/${NAME}.sc
+            -o ${SHADER_OUT}/dx11/${NAME}.bin
+            --type ${TYPE} --platform windows --profile s_5_0
+            --entry main
+            --varyingdef ${VARYING_FILE}
+            -i ${BGFX_SHADER_INCLUDE}
+            -i ${SHADER_DIR}
+    DEPENDS ${SHADER_DIR}/${NAME}.sc ${VARYING_FILE} shaderc
+    COMMENT "Compiling ${NAME}.sc -> dx11/${NAME}.bin"
+    VERBATIM
+  )
 
+  # SPIR-V (Vulkan)
+  add_custom_command(
+    OUTPUT ${SHADER_OUT}/spirv/${NAME}.bin
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}/spirv
+    COMMAND $<TARGET_FILE:shaderc>
+            -f ${SHADER_DIR}/${NAME}.sc
+            -o ${SHADER_OUT}/spirv/${NAME}.bin
+            --type ${TYPE} --platform linux --profile spirv
+            --entry main
+            --varyingdef ${VARYING_FILE}
+            -i ${BGFX_SHADER_INCLUDE}
+            -i ${SHADER_DIR}
+    DEPENDS ${SHADER_DIR}/${NAME}.sc ${VARYING_FILE} shaderc
+    COMMENT "Compiling ${NAME}.sc -> spirv/${NAME}.bin"
+    VERBATIM
+  )
 
-bgfx_shader_multi(VS_BINS vs_simple v)
-bgfx_shader_multi(FS_BINS fs_simple f)
-set(SHADER_BINARIES ${VS_BINS} ${FS_BINS})
+  # OpenGL (GLSL 1.50)
+  add_custom_command(
+    OUTPUT ${SHADER_OUT}/glsl/${NAME}.bin
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}/glsl
+    COMMAND $<TARGET_FILE:shaderc>
+            -f ${SHADER_DIR}/${NAME}.sc
+            -o ${SHADER_OUT}/glsl/${NAME}.bin
+            --type ${TYPE} --platform linux --profile 150
+            --entry main
+            --varyingdef ${VARYING_FILE}
+            -i ${BGFX_SHADER_INCLUDE}
+            -i ${SHADER_DIR}
+    DEPENDS ${SHADER_DIR}/${NAME}.sc ${VARYING_FILE} shaderc
+    COMMENT "Compiling ${NAME}.sc -> glsl/${NAME}.bin"
+    VERBATIM
+  )
+
+  list(APPEND _outs
+    ${SHADER_OUT}/dx11/${NAME}.bin
+    ${SHADER_OUT}/spirv/${NAME}.bin
+    ${SHADER_OUT}/glsl/${NAME}.bin
+  )
+  set(${OUT} "${_outs}" PARENT_SCOPE)
+endfunction()
+
+# 统一：所有 shader 都使用同一份 varying.def.sc（建议删除仓库里的 varying_all.def.sc 以免误用）
+set(VARYING_FILE ${SHADER_DIR}/varying.def.sc)
+
+bgfx_shader_multi_with_varying(VS_SIMPLE_BINS vs_simple v ${VARYING_FILE})
+bgfx_shader_multi_with_varying(FS_SIMPLE_BINS fs_simple f ${VARYING_FILE})
+
+bgfx_shader_multi_with_varying(VS_TEX_BINS    vs_tex    v ${VARYING_FILE})
+bgfx_shader_multi_with_varying(FS_TEX_BINS    fs_tex    f ${VARYING_FILE})
+
+bgfx_shader_multi_with_varying(VS_MESH_BINS   vs_mesh   v ${VARYING_FILE})
+bgfx_shader_multi_with_varying(FS_MESH_BINS   fs_mesh   f ${VARYING_FILE})
+
+set(SHADER_BINARIES
+  ${VS_SIMPLE_BINS} ${FS_SIMPLE_BINS}
+  ${VS_TEX_BINS}    ${FS_TEX_BINS}
+  ${VS_MESH_BINS}   ${FS_MESH_BINS}
+)
 
 add_custom_target(build_shaders ALL DEPENDS ${SHADER_BINARIES})
+# 保留一处依赖即可（去掉重复的那一行）
 add_dependencies(KEngine build_shaders)
 
-# 运行时让程序知道 shader 输出目录
+# 运行时宏
 target_compile_definitions(KEngine PRIVATE KE_SHADER_DIR=\"${SHADER_OUT}\")
-add_dependencies(KEngine build_shaders)
-# === 把编译好的着色器复制到可执行文件旁边 ===
+target_compile_definitions(KEngine PRIVATE KE_ASSET_DIR=\"${CMAKE_SOURCE_DIR}/docs\")
+
+# 拷贝 DX11 shader 到可执行目录（如需也拷 glsl/spirv，照葫芦画瓢再加两段）
 add_custom_command(TARGET KEngine POST_BUILD
-  # 目标目录：<exe同级>/shaders/dx11
-  COMMAND ${CMAKE_COMMAND} -E make_directory
-          "$<TARGET_FILE_DIR:KEngine>/shaders/dx11"
-  # 整个目录拷贝（包含你后续新增的 .bin）
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${SHADER_OUT}/dx11" "$<TARGET_FILE_DIR:KEngine>/shaders/dx11"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:KEngine>/shaders/dx11"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${SHADER_OUT}/dx11" "$<TARGET_FILE_DIR:KEngine>/shaders/dx11"
 )
+
 
 # --------------------------------------------------------------------------
 # （可选）把源码分组到 IDE 过滤器
