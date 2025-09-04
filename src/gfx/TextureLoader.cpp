@@ -3,10 +3,12 @@
 
 // 只需要这一个头；实现放在本 cpp（单 TU）里
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION   // 新增：提供 stbi_write_* 的实现
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
 #define STBI_MSC_SECURE_CRT
 #include <stb_image.h>
+#include <stb_image_write.h>
 
 bool loadImageRGBA(const std::string& path, int& w, int& h,
                    std::vector<uint8_t>& pixels, bool flipY)

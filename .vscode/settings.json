@@ -4,6 +4,8 @@
   "cmake.buildPreset": "vs2022-x64-RWD",
   "cmake.configureOnOpen": true,
   "C_Cpp.errorSquiggles": "disabled",
+  "cmake.buildEnvironment":     { "VSLANG": "1033", "CL": "/utf-8" },
+  "cmake.configureEnvironment": { "VSLANG": "1033", "CL": "/utf-8" },
   "files.associations": {
     "vector": "cpp",
     "algorithm": "cpp",
@@ -90,6 +92,7 @@
     "xstring": "cpp",
     "xtr1common": "cpp",
     "xtree": "cpp",
-    "xutility": "cpp"
+    "xutility": "cpp",
+    "cassert": "cpp"
   }
 }

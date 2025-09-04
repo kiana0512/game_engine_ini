@@ -1,17 +1,22 @@
 #include "GltfLoader.h"
-#include <tiny_gltf.h>
 #include <spdlog/spdlog.h>
 #include <cassert>
 #include <filesystem>
 
 namespace fs = std::filesystem;
-
-// 只在本 TU 实现 tinygltf
-#define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION       // tinygltf 会用到（与我们自己的 stb_image 实现分离 TU 没问题）
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+// 仅声明 stb 的函数即可（不要 #define STB_*_IMPLEMENTATION）
 #include <stb_image.h>
 #include <stb_image_write.h>
+
+// 只在本 TU 里生成 tinygltf 的实现；明确禁止它去包含/实现 stb，
+// 这样 stb 的实现就只来自 TextureLoader.cpp（避免 LNK2005）
+#define TINYGLTF_NO_INCLUDE_STB_IMAGE
+#define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
+#define TINYGLTF_NOEXCEPTION          // 可选：不用异常
+#define TINYGLTF_IMPLEMENTATION
+#include <tiny_gltf.h>
+
+
 
 static std::string dirOf(const std::string& path) {
     try { return fs::path(path).parent_path().string(); }

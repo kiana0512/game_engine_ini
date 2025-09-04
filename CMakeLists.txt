@@ -44,10 +44,12 @@ target_include_directories(KEngine PRIVATE
  extern/tinygltf         #  让 <tiny_gltf.h> 可见
 )
 
+find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(KEngine PRIVATE
   SDL2::SDL2main SDL2::SDL2
   spdlog::spdlog fmt::fmt
   bgfx bimg bx 
+  nlohmann_json::nlohmann_json
 )
 
 if(MSVC)

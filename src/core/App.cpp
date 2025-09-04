@@ -101,6 +101,7 @@ void App::handleKeyDown(SDL_Keycode key)
 {
     switch (key)
     {
+    // --- 工具与调试键 ---
     case SDLK_r: // 热重载两套 shader
         renderer_.hotReloadShaders();
         break;
@@ -109,66 +110,81 @@ void App::handleKeyDown(SDL_Keycode key)
         dbgFlags_ ^= BGFX_DEBUG_STATS;
         renderer_.setDebug(dbgFlags_);
         break;
+
     case SDLK_F2: // IFH
         dbgFlags_ ^= BGFX_DEBUG_IFH;
         renderer_.setDebug(dbgFlags_);
         break;
+
     case SDLK_F3: // 只保留文字
         dbgFlags_ = BGFX_DEBUG_TEXT;
         renderer_.setDebug(dbgFlags_);
         break;
 
-    case SDLK_h:
+    case SDLK_h: // 显隐帮助
         showHelp_ = !showHelp_;
         renderer_.setShowHelp(showHelp_);
         break;
 
-    case SDLK_1:
+    // --- 绘制模式 ---
+    case SDLK_1: // 三角
         draw_ = DrawMode::Triangle;
         renderer_.setDrawMode(draw_);
         renderer_.setUseTexture(useTex_);
         break;
-    case SDLK_2:
+
+    case SDLK_2: // 四边形
         draw_ = DrawMode::Quad;
         renderer_.setDrawMode(draw_);
         renderer_.setUseTexture(useTex_);
         break;
 
+    // --- 相机 ---
     case SDLK_o:
         camera_.setMode(CameraMode::Ortho);
         break;
+
     case SDLK_p:
         camera_.setMode(CameraMode::Perspective);
         break;
 
-    case SDLK_t: // 贴图开关
+    // --- 贴图开关 ---
+    case SDLK_t:
         useTex_ = !useTex_;
         renderer_.setUseTexture(useTex_);
         break;
-    default:
-        break;
 
-    case SDLK_l: // L：从磁盘重新加载 docs/image.png
-        std::string path = std::string(KE_ASSET_DIR) + "/image.png";
+    // --- 重新加载纹理（注意：此 case 定义了局部变量，用块作用域包裹） ---
+    case SDLK_l:
+    {
+        const std::string path = std::string(KE_ASSET_DIR) + "/image.png";
         renderer_.loadTextureFromFile(path);
         break;
+    }
 
+    // --- 加载 glTF/GLB 模型并切换到网格绘制（同样用块作用域） ---
     case SDLK_m:
-        // M: 从磁盘加载 glTF 模型并切换到网格绘制
-        std::string p1 = std::string(KE_ASSET_DIR) + "/models/model.gltf";
-        std::string p2 = std::string(KE_ASSET_DIR) + "/models/model.glb";
+    {
+        const std::string p1 = std::string(KE_ASSET_DIR) + "/models/model.gltf";
+        const std::string p2 = std::string(KE_ASSET_DIR) + "/models/model.glb";
+
         bool ok = renderer_.loadMeshFromGltf(p1);
-        if (!ok)
-            ok = renderer_.loadMeshFromGltf(p2);
+        if (!ok) ok = renderer_.loadMeshFromGltf(p2);
+
         if (ok)
         {
-            renderer_.setDrawMode(DrawMode::Mesh); // 你已有 setDrawMode 的话；否则内部切换
+            renderer_.setDrawMode(DrawMode::Mesh); // 若 DrawMode 为 enum，改为 Mesh
             spdlog::info("[App] Mesh mode ON");
         }
         else
         {
             spdlog::error("[App] Load mesh failed (tried model.gltf / model.glb)");
         }
+        break;
+    }
+
+    // --- 兜底 ---
+    default:
         break;
     }
 }

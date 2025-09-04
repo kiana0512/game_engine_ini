@@ -333,9 +333,9 @@ void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, f
     bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA);
 
     // 模型矩阵（绕 Z 旋转）
-    float model[16];
-    bx::mtxRotateZ(model, angle);
-    bgfx::setTransform(model);
+    float mtxModel[16];
+    bx::mtxRotateZ(mtxModel, angle);
+    bgfx::setTransform(mtxModel);
 
     // 优先：Mesh 模式（独立于 useTex_ 开关）
     if (drawMode_ == DrawMode::Mesh)

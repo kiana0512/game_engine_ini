@@ -10,11 +10,31 @@
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "C:/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "CMAKE_CONFIGURATION_TYPES": "Debug;RelWithDebInfo;Release"
+      },
+      "environment": {
+        "VSLANG": "1033",
+        "CL": "/utf-8"
       }
     }
   ],
   "buildPresets": [
-    { "name": "vs2022-x64-D",   "configurePreset": "vs2022-x64", "configuration": "Debug" },
-    { "name": "vs2022-x64-RWD", "configurePreset": "vs2022-x64", "configuration": "RelWithDebInfo" }
+    {
+      "name": "vs2022-x64-D",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Debug",
+      "environment": {
+        "VSLANG": "1033",
+        "CL": "/utf-8"
+      }
+    },
+    {
+      "name": "vs2022-x64-RWD",
+      "configurePreset": "vs2022-x64",
+      "configuration": "RelWithDebInfo",
+      "environment": {
+        "VSLANG": "1033",
+        "CL": "/utf-8"
+      }
+    }
   ]
 }

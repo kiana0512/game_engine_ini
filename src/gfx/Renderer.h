@@ -3,8 +3,11 @@
 #include <SDL.h>
 #include <string>
 
-enum class DrawMode
-{
+// 头文件的合适位置
+enum class DrawMode : uint8_t {
+    Simple,
+    Tex,
+    Mesh,
     Triangle,
     Quad
 };
@@ -31,6 +34,8 @@ public:
 
     // 每帧渲染一张图；返回统计（用于 HUD 打印）
     void renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, float angle);
+    void buildMeshLayout();              // 建议单独封装一下
+    bool loadMeshFromGltf(const std::string &path);
 
 private:
     void *nativeWindowHandle(SDL_Window *win);
@@ -56,6 +61,7 @@ private:
     bgfx::ProgramHandle progTex_ = BGFX_INVALID_HANDLE;
 
     // 顶点/索引缓冲（颜色）
+    bgfx::VertexLayout meshLayout_{}; //  新增：顶点布局
     bgfx::VertexBufferHandle vbhTri_ = BGFX_INVALID_HANDLE;  // 无索引三角
     bgfx::VertexBufferHandle vbhQuad_ = BGFX_INVALID_HANDLE; // 索引四边
     bgfx::IndexBufferHandle ibhQuad_ = BGFX_INVALID_HANDLE;
@@ -80,6 +86,4 @@ private:
     bgfx::IndexBufferHandle meshIbh_ = BGFX_INVALID_HANDLE;
     uint32_t meshIndexCount_ = 0;
     bool meshLoaded_ = false;
-
-    bool loadMeshFromGltf(const std::string &path);
 };
