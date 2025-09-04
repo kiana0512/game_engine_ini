@@ -83,6 +83,8 @@ void App::run()
         angle_ += dt;
 
         renderer_.renderFrame(camera_, lastDraws_, lastTris_, angle_);
+        // 用 Scene 渲染
+        // renderer_.renderScene(scene_);
     }
 }
 
@@ -139,6 +141,12 @@ void App::handleKeyDown(SDL_Keycode key)
         renderer_.setUseTexture(useTex_);
         break;
 
+    case SDLK_3: // 网格（Mesh）
+        draw_ = DrawMode::Mesh;
+        renderer_.setDrawMode(draw_);
+        renderer_.setUseTexture(useTex_);
+        break;
+
     // --- 相机 ---
     case SDLK_o:
         camera_.setMode(CameraMode::Ortho);
@@ -162,23 +170,26 @@ void App::handleKeyDown(SDL_Keycode key)
         break;
     }
 
-    // --- 加载 glTF/GLB 模型并切换到网格绘制（同样用块作用域） ---
+        // --- 加载 glTF/GLB 模型并切换到网格绘制（同样用块作用域） ---
     case SDLK_m:
     {
         const std::string p1 = std::string(KE_ASSET_DIR) + "/models/model.gltf";
         const std::string p2 = std::string(KE_ASSET_DIR) + "/models/model.glb";
 
-        bool ok = renderer_.loadMeshFromGltf(p1);
-        if (!ok) ok = renderer_.loadMeshFromGltf(p2);
+        bool ok = renderer_.addMeshFromGltfToScene(p1, scene_);
+        if (!ok)
+            ok = renderer_.addMeshFromGltfToScene(p2, scene_);
 
         if (ok)
         {
-            renderer_.setDrawMode(DrawMode::Mesh); // 若 DrawMode 为 enum，改为 Mesh
-            spdlog::info("[App] Mesh mode ON");
+            // 以后你可以完全改用 Scene 渲染：
+            // 在 App::run() 的循环里，调用 renderer_.renderScene(scene_);
+            // 现在先日志提示一下
+            spdlog::info("[App] Mesh added to Scene");
         }
         else
         {
-            spdlog::error("[App] Load mesh failed (tried model.gltf / model.glb)");
+            spdlog::error("[App] Load mesh to Scene failed (tried model.gltf / model.glb)");
         }
         break;
     }

@@ -1,19 +1,31 @@
+// Renderer.cpp — 修正版（详注）
 #include "Renderer.h"
 #include "Camera.h"
+
+// === bgfx 头：优先公共入口，内部会包含所需声明 ===
+#include <bgfx/bgfx.h>
 #include <bgfx/platform.h>
 #include <bx/math.h>
+
 #include <spdlog/spdlog.h>
 #include <vector>
+
 #include "gfx/shader_utils.h" // ke_loadProgramDx11
-//  新增：没有它，SDL_SysWMinfo / SDL_GetWindowWMInfo 都是未声明
-#include <SDL_syswm.h>
+#include <SDL_syswm.h>        // SDL_SysWMinfo / SDL_GetWindowWMInfo
+
 #include "TextureLoader.h"
-#include "GltfLoader.h"
-// 顶点格式（颜色）
+#include "GltfLoader.h"  // MeshData / MeshVertex / loadGltfMesh(...)
+#include "scene/Scene.h" // Scene / MeshComp（你自己的定义）
+
+// ========== 文件私有静态（光照 uniform） ==========
+static bgfx::UniformHandle s_uLightDir = BGFX_INVALID_HANDLE;
+
+// ========== 两套演示用顶点格式（纯色 / 贴图） ==========
 struct PosColorVertex
 {
     float x, y, z;
     uint32_t abgr;
+
     static void init(bgfx::VertexLayout &layout)
     {
         layout.begin()
@@ -22,12 +34,13 @@ struct PosColorVertex
             .end();
     }
 };
-// 顶点格式（带纹理）
+
 struct PosColorTexVertex
 {
     float x, y, z;
     uint32_t abgr;
     float u, v;
+
     static void init(bgfx::VertexLayout &layout)
     {
         layout.begin()
@@ -38,12 +51,14 @@ struct PosColorTexVertex
     }
 };
 
+// ========== 平台窗口句柄 ==========
 void *Renderer::nativeWindowHandle(SDL_Window *win)
 {
     SDL_SysWMinfo wmi;
     SDL_VERSION(&wmi.version);
     if (SDL_GetWindowWMInfo(win, &wmi) != SDL_TRUE)
         return nullptr;
+
 #if defined(_WIN32)
     return wmi.info.win.window;
 #elif defined(__APPLE__)
@@ -53,32 +68,65 @@ void *Renderer::nativeWindowHandle(SDL_Window *win)
 #endif
 }
 
+// ========== 初始化 / 反初始化 ==========
+// ========== 初始化 / 反初始化 ==========
 bool Renderer::init(SDL_Window *window, int width, int height)
 {
     width_ = width;
     height_ = height;
 
-    bgfx::Init init{};
-    init.type = bgfx::RendererType::Count;
-    init.platformData.nwh = nativeWindowHandle(window);
-    init.resolution.width = (uint32_t)width_;
-    init.resolution.height = (uint32_t)height_;
-    init.resolution.reset = BGFX_RESET_VSYNC;
-
-    if (!bgfx::init(init))
+    // 1) 取原生窗口句柄（nwh），并打印出来用于定位“无窗/黑屏”
+    void *nwh = nativeWindowHandle(window);
+    spdlog::info("[Renderer] native window handle (nwh) = {}", (void *)nwh);
+    if (!nwh)
     {
-        spdlog::error("bgfx init failed");
+        spdlog::error("[Renderer] nativeWindowHandle(window) returned null. "
+                      "Check SDL_CreateWindow flags (must include SDL_WINDOW_SHOWN).");
         return false;
     }
 
-    dbgFlags_ = BGFX_DEBUG_TEXT; // 默认只显示文字
+    // 2) 配置 bgfx::Init
+    bgfx::Init init{};
+#if BX_PLATFORM_WINDOWS
+    // 在 Windows 上，先固定 D3D11 以便排查（确认有画面后可改回 Count 让 bgfx 自选）
+    init.type = bgfx::RendererType::Direct3D11;
+#else
+    init.type = bgfx::RendererType::Count; // 其它平台自动选择
+#endif
+    init.platformData.nwh = nwh; // ← 关键：窗口句柄
+    init.resolution.width = static_cast<uint32_t>(width_);
+    init.resolution.height = static_cast<uint32_t>(height_);
+    init.resolution.reset = BGFX_RESET_VSYNC; // 打开垂直同步，避免撕裂
+
+    // 3) 初始化 bgfx
+    if (!bgfx::init(init))
+    {
+        spdlog::error("bgfx init failed (type={}x{}, width={}, height={})",
+#if BX_PLATFORM_WINDOWS
+                      "D3D11",
+#else
+                      "Auto",
+#endif
+                      0, width_, height_);
+        return false;
+    }
+
+    // 4) Debug/HUD 文本开关
+    dbgFlags_ = BGFX_DEBUG_TEXT; // 默认开文字（F1/F2/F3 可以切）
     bgfx::setDebug(dbgFlags_);
 
+    // 5) 配置主视图：名称、清屏、视口
     bgfx::setViewName(view_, "main");
-    bgfx::setViewClear(view_, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
-    bgfx::setViewRect(view_, 0, 0, (uint16_t)width_, (uint16_t)height_);
+    bgfx::setViewClear(view_, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH,
+                       0x303030ff /*灰底*/, 1.0f, 0);
+    bgfx::setViewRect(view_, 0, 0,
+                      static_cast<uint16_t>(width_),
+                      static_cast<uint16_t>(height_));
+
+    // 6) 即使本帧不提交 draw call，也要 touch 一下确保清屏发生
     bgfx::touch(view_);
 
+    // 7) 资源加载（Program/Geometry/Texture）
     if (!createPipelines())
         return false;
     if (!createGeometry())
@@ -86,6 +134,14 @@ bool Renderer::init(SDL_Window *window, int width, int height)
     if (!createTexture())
         return false;
 
+    spdlog::info("[Renderer] init OK ({}x{}, renderer={})",
+                 width_, height_,
+#if BX_PLATFORM_WINDOWS
+                 "D3D11"
+#else
+                 "Auto"
+#endif
+    );
     return true;
 }
 
@@ -94,7 +150,6 @@ void Renderer::shutdown()
     destroyTexture();
     destroyGeometry();
     destroyPipelines();
-
     bgfx::shutdown();
 }
 
@@ -106,21 +161,24 @@ void Renderer::resize(int width, int height)
     bgfx::setViewRect(view_, 0, 0, (uint16_t)width_, (uint16_t)height_);
 }
 
+// ========== Debug 切换 ==========
 void Renderer::setDebug(uint32_t flags)
 {
     dbgFlags_ = flags;
     bgfx::setDebug(dbgFlags_);
 }
-
 void Renderer::toggleDebug(uint32_t mask)
 {
     dbgFlags_ ^= mask;
     bgfx::setDebug(dbgFlags_);
 }
 
+// ========== Shader / Program ==========
 bool Renderer::createPipelines()
 {
     spdlog::info("Loading shaders ...");
+
+    // 基础 program
     progColor_ = ke_loadProgramDx11("vs_simple.bin", "fs_simple.bin");
     progTex_ = ke_loadProgramDx11("vs_tex.bin", "fs_tex.bin");
     if (!bgfx::isValid(progColor_) || !bgfx::isValid(progTex_))
@@ -128,20 +186,25 @@ bool Renderer::createPipelines()
         spdlog::error("Failed to load shader programs.");
         return false;
     }
-    // === Mesh 管线（position/normal/uv + 贴图）===
+
+    // Mesh program（position/normal/uv + 贴图）
     programMesh_ = ke_loadProgramDx11("vs_mesh.bin", "fs_mesh.bin");
     if (!bgfx::isValid(programMesh_))
     {
         spdlog::error("Failed to load mesh program (vs_mesh/fs_mesh)");
-        // 非致命：你也可以 return false; 这里我选择继续跑（只是不能画 Mesh）
+        // 不中断，仍可画基础图元
     }
 
-    // 初始化 Mesh 顶点布局
+    // Mesh 顶点布局（与你的 MeshVertex 对齐：pos(3f)+normal(3f)+uv(2f)）
     meshLayout_.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
         .end();
+
+    // 光照 uniform
+    if (!bgfx::isValid(s_uLightDir))
+        s_uLightDir = bgfx::createUniform("u_lightDir", bgfx::UniformType::Vec4);
 
     return true;
 }
@@ -163,49 +226,59 @@ void Renderer::destroyPipelines()
         bgfx::destroy(programMesh_);
         programMesh_ = BGFX_INVALID_HANDLE;
     }
+    if (bgfx::isValid(s_uLightDir))
+    {
+        bgfx::destroy(s_uLightDir);
+        s_uLightDir = BGFX_INVALID_HANDLE;
+    }
 }
 
+// ========== 基础几何（演示） ==========
 bool Renderer::createGeometry()
 {
-    // 布局
     bgfx::VertexLayout layoutColor;
     PosColorVertex::init(layoutColor);
     bgfx::VertexLayout layoutTex;
     PosColorTexVertex::init(layoutTex);
 
     // 颜色三角（无索引）
-    const PosColorVertex triVerts[] = {
-        {0.0f, 0.6f, 0.0f, 0xff00ffff},
-        {0.8f, -0.6f, 0.0f, 0xffffff00},
-        {-0.6f, -0.6f, 0.0f, 0xff00ff00}};
+    const PosColorVertex triVerts[] =
+        {
+            {0.0f, 0.6f, 0.0f, 0xff00ffff},
+            {0.8f, -0.6f, 0.0f, 0xffffff00},
+            {-0.6f, -0.6f, 0.0f, 0xff00ff00},
+        };
     vbhTri_ = bgfx::createVertexBuffer(bgfx::copy(triVerts, sizeof(triVerts)), layoutColor);
 
     // 颜色四边（索引）
-    const PosColorVertex quadVerts[] = {
-        {-0.8f, 0.6f, 0.0f, 0xff00ffff},
-        {0.8f, 0.6f, 0.0f, 0xffffff00},
-        {0.8f, -0.6f, 0.0f, 0xff00ff00},
-        {-0.8f, -0.6f, 0.0f, 0xff00ffff},
-    };
+    const PosColorVertex quadVerts[] =
+        {
+            {-0.8f, 0.6f, 0.0f, 0xff00ffff},
+            {0.8f, 0.6f, 0.0f, 0xffffff00},
+            {0.8f, -0.6f, 0.0f, 0xff00ff00},
+            {-0.8f, -0.6f, 0.0f, 0xff00ffff},
+        };
     const uint16_t quadIdx[] = {0, 1, 2, 0, 2, 3};
     vbhQuad_ = bgfx::createVertexBuffer(bgfx::copy(quadVerts, sizeof(quadVerts)), layoutColor);
     ibhQuad_ = bgfx::createIndexBuffer(bgfx::copy(quadIdx, sizeof(quadIdx)));
 
     // 纹理三角（无索引）
-    const PosColorTexVertex triTexVerts[] = {
-        {0.0f, 0.6f, 0.0f, 0xffffffff, 0.5f, 0.0f},
-        {0.8f, -0.6f, 0.0f, 0xffffffff, 1.0f, 1.0f},
-        {-0.6f, -0.6f, 0.0f, 0xffffffff, 0.0f, 1.0f},
-    };
+    const PosColorTexVertex triTexVerts[] =
+        {
+            {0.0f, 0.6f, 0.0f, 0xffffffff, 0.5f, 0.0f},
+            {0.8f, -0.6f, 0.0f, 0xffffffff, 1.0f, 1.0f},
+            {-0.6f, -0.6f, 0.0f, 0xffffffff, 0.0f, 1.0f},
+        };
     vbhTriTex_ = bgfx::createVertexBuffer(bgfx::copy(triTexVerts, sizeof(triTexVerts)), layoutTex);
 
     // 纹理四边（复用 quadIdx）
-    const PosColorTexVertex quadTexVerts[] = {
-        {-0.8f, 0.6f, 0.0f, 0xffffffff, 0.0f, 0.0f},
-        {0.8f, 0.6f, 0.0f, 0xffffffff, 1.0f, 0.0f},
-        {0.8f, -0.6f, 0.0f, 0xffffffff, 1.0f, 1.0f},
-        {-0.8f, -0.6f, 0.0f, 0xffffffff, 0.0f, 1.0f},
-    };
+    const PosColorTexVertex quadTexVerts[] =
+        {
+            {-0.8f, 0.6f, 0.0f, 0xffffffff, 0.0f, 0.0f},
+            {0.8f, 0.6f, 0.0f, 0xffffffff, 1.0f, 0.0f},
+            {0.8f, -0.6f, 0.0f, 0xffffffff, 1.0f, 1.0f},
+            {-0.8f, -0.6f, 0.0f, 0xffffffff, 0.0f, 1.0f},
+        };
     vbhQuadTex_ = bgfx::createVertexBuffer(bgfx::copy(quadTexVerts, sizeof(quadTexVerts)), layoutTex);
 
     if (!bgfx::isValid(vbhTri_) || !bgfx::isValid(vbhQuad_) || !bgfx::isValid(ibhQuad_) || !bgfx::isValid(vbhTriTex_) || !bgfx::isValid(vbhQuadTex_))
@@ -245,14 +318,14 @@ void Renderer::destroyGeometry()
     }
 }
 
+// ========== 纹理 ==========
 bool Renderer::createTexture()
 {
     uSampler_ = bgfx::createUniform("s_texColor", bgfx::UniformType::Sampler);
 
-    samplerFlags_ = static_cast<uint32_t>(
-        BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT);
+    samplerFlags_ = uint32_t(BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT);
 
-    // 先尝试从 docs/image.png 加载
+    // 先从 docs/image.png 尝试
     std::string path = std::string(KE_ASSET_DIR) + "/image.png";
     tex_ = createTexture2DFromFile(path, /*srgb=*/false, samplerFlags_);
     if (bgfx::isValid(tex_))
@@ -261,7 +334,7 @@ bool Renderer::createTexture()
         return true;
     }
 
-    // 失败则回退到棋盘
+    // 回退棋盘
     tex_ = createCheckerTexRGBA8(256, 256, 32);
     if (!bgfx::isValid(uSampler_) || !bgfx::isValid(tex_))
     {
@@ -290,7 +363,6 @@ bgfx::TextureHandle Renderer::createCheckerTexRGBA8(uint16_t w, uint16_t h, uint
 {
     std::vector<uint8_t> pixels(size_t(w) * h * 4);
     for (uint16_t y = 0; y < h; ++y)
-    {
         for (uint16_t x = 0; x < w; ++x)
         {
             bool odd = ((x / cell) + (y / cell)) & 1;
@@ -301,49 +373,45 @@ bgfx::TextureHandle Renderer::createCheckerTexRGBA8(uint16_t w, uint16_t h, uint
             pixels[i + 2] = v;
             pixels[i + 3] = 255;
         }
-    }
     const bgfx::Memory *mem = bgfx::copy(pixels.data(), (uint32_t)pixels.size());
     return bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA8, 0, mem);
 }
 
+// ========== 热重载 ==========
 void Renderer::hotReloadShaders()
 {
     destroyPipelines();
     createPipelines();
 }
 
+// ========== 每帧渲染（演示图元 + Mesh） ==========
 void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, float angle)
 {
-    // HUD（显示上一帧数据）
+    // HUD
     bgfx::dbgTextClear();
-    bgfx::dbgTextPrintf(0, 3, 0x0a, "M: load glTF (docs/models/model.gltf) and draw Mesh");
     bgfx::dbgTextPrintf(0, 0, 0x0f, "Draw(last)=%u  Tris(last)=%u", outDraws, outTris);
+    bgfx::dbgTextPrintf(0, 3, 0x0a, "M: load glTF (docs/models/model.gltf) and draw Mesh");
     if (showHelp_)
     {
         bgfx::dbgTextPrintf(0, 1, 0x0a, "R: reload  F1/F2/F3: debug  T: tex on/off");
-        bgfx::dbgTextPrintf(0, 2, 0x0a, "1: triangle  2: quad   O: ortho  P: persp  H: help");
+        bgfx::dbgTextPrintf(0, 2, 0x0a, "1: tri  2: quad  3: mesh   O: ortho  P: persp  H: help");
+        bgfx::dbgTextPrintf(0, 3, 0x0a, "M: load glTF (docs/models/model.gltf)");
     }
 
     cam.apply(view_);
     bgfx::touch(view_);
-
-    float model[16];
-    bx::mtxRotateZ(model, angle);
-    bgfx::setTransform(model);
-    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA);
 
     // 模型矩阵（绕 Z 旋转）
     float mtxModel[16];
     bx::mtxRotateZ(mtxModel, angle);
     bgfx::setTransform(mtxModel);
 
-    // 优先：Mesh 模式（独立于 useTex_ 开关）
+    // 优先：Mesh 模式
     if (drawMode_ == DrawMode::Mesh)
     {
         if (meshLoaded_ && bgfx::isValid(programMesh_))
         {
-            // Mesh 走贴图管线（fs_mesh 取 s_texColor）
-            bgfx::setTexture(0, uSampler_, tex_, samplerFlags_);
+            bgfx::setTexture(0, uSampler_, tex_, samplerFlags_); // fs_mesh sample 用
             bgfx::setVertexBuffer(0, meshVbh_);
             bgfx::setIndexBuffer(meshIbh_);
             bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA | BGFX_STATE_DEPTH_TEST_LESS);
@@ -351,12 +419,11 @@ void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, f
         }
     }
     else if (!useTex_)
-    { // 你原来的“纯色”分支
+    {
+        // 纯色
         bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA);
         if (drawMode_ == DrawMode::Triangle)
-        {
             bgfx::setVertexBuffer(0, vbhTri_, 0, 3);
-        }
         else
         {
             bgfx::setVertexBuffer(0, vbhQuad_);
@@ -365,13 +432,12 @@ void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, f
         bgfx::submit(view_, progColor_);
     }
     else
-    { // 你原来的“贴图”分支
+    {
+        // 贴图
         bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA);
         bgfx::setTexture(0, uSampler_, tex_, samplerFlags_);
         if (drawMode_ == DrawMode::Triangle)
-        {
             bgfx::setVertexBuffer(0, vbhTriTex_, 0, 3);
-        }
         else
         {
             bgfx::setVertexBuffer(0, vbhQuadTex_);
@@ -382,7 +448,7 @@ void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, f
 
     bgfx::frame();
 
-    // 统计当前帧，交回给上层用于“下一帧”打印
+    // 统计
     if (const bgfx::Stats *st = bgfx::getStats())
     {
 #if defined(BGFX_TOPOLOGY_TRI_LIST)
@@ -393,6 +459,8 @@ void Renderer::renderFrame(Camera &cam, uint32_t &outDraws, uint32_t &outTris, f
         outDraws = st->numDraw;
     }
 }
+
+// ========== 动态更换贴图 ==========
 bool Renderer::loadTextureFromFile(const std::string &path)
 {
     auto newTex = createTexture2DFromFile(path, /*srgb=*/false, samplerFlags_);
@@ -407,17 +475,19 @@ bool Renderer::loadTextureFromFile(const std::string &path)
     spdlog::info("[Texture] reloaded: {}", path);
     return true;
 }
+
+// ========== 从 glTF 载入 Mesh（创建本类成员 VB/IB） ==========
 bool Renderer::loadMeshFromGltf(const std::string &path)
 {
-    MeshData md;
-    std::string w, e;
-    if (!loadGltfMesh(path, md, &w, &e))
+    MeshData md{};
+    std::string warn, err;
+    if (!loadGltfMesh(path, md, &warn, &err)) // ← 注意：这是 “bool + 输出参数” 的形式
     {
-        spdlog::error("[Renderer] loadGltfMesh failed: {}", path);
+        spdlog::error("[Renderer] loadGltfMesh failed: {}  warn={}  err={}", path, warn, err);
         return false;
     }
 
-    // 先清旧的
+    // 清旧的
     if (bgfx::isValid(meshVbh_))
         bgfx::destroy(meshVbh_);
     if (bgfx::isValid(meshIbh_))
@@ -425,11 +495,15 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
     meshVbh_ = BGFX_INVALID_HANDLE;
     meshIbh_ = BGFX_INVALID_HANDLE;
 
-    // 创建 VBO/IBO
-    const bgfx::Memory *vbmem = bgfx::copy(md.vertices.data(), (uint32_t)(md.vertices.size() * sizeof(MeshVertex)));
+    // 创建 VBO / IBO（使用你的 MeshVertex / uint16 索引）
+    const bgfx::Memory *vbmem =
+        bgfx::copy(md.vertices.data(), (uint32_t)(md.vertices.size() * sizeof(MeshVertex)));
     meshVbh_ = bgfx::createVertexBuffer(vbmem, meshLayout_);
-    const bgfx::Memory *ibmem = bgfx::copy(md.indices.data(), (uint32_t)(md.indices.size() * sizeof(uint16_t)));
+
+    const bgfx::Memory *ibmem =
+        bgfx::copy(md.indices.data(), (uint32_t)(md.indices.size() * sizeof(uint16_t)));
     meshIbh_ = bgfx::createIndexBuffer(ibmem);
+
     meshIndexCount_ = (uint32_t)md.indices.size();
 
     if (!bgfx::isValid(meshVbh_) || !bgfx::isValid(meshIbh_))
@@ -438,13 +512,81 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
         return false;
     }
 
-    // 贴图：若 glTF 有外链 BaseColor，读它；否则保留当前纹理（棋盘/上次的）
+    // 若 glTF 有 BaseColor 贴图，替换为该贴图；否则保留当前纹理（棋盘/上次）
     if (!md.baseColorTexPath.empty())
-    {
-        loadTextureFromFile(md.baseColorTexPath);
-    }
+        (void)loadTextureFromFile(md.baseColorTexPath);
 
     meshLoaded_ = true;
     spdlog::info("[Renderer] mesh loaded. verts={} indices={}", md.vertices.size(), md.indices.size());
     return true;
+}
+
+// ========== 把 glTF 加入 Scene 的最小桥接 ==========
+bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &scn)
+{
+    MeshData md{};
+    std::string w, e;
+    if (!loadGltfMesh(path, md, &w, &e))
+    {
+        spdlog::error("[Renderer] addMeshFromGltfToScene: loadGltfMesh failed: {}  warn={} err={}", path, w, e);
+        return false;
+    }
+
+    // 顶点/索引缓冲（注意类型与布局要与 MeshVertex 对齐）
+    const bgfx::Memory *vmem =
+        bgfx::copy(md.vertices.data(), (uint32_t)(md.vertices.size() * sizeof(MeshVertex)));
+    bgfx::VertexBufferHandle vbh = bgfx::createVertexBuffer(vmem, meshLayout_);
+
+    const bgfx::Memory *imem =
+        bgfx::copy(md.indices.data(), (uint32_t)(md.indices.size() * sizeof(uint16_t)));
+    bgfx::IndexBufferHandle ibh = bgfx::createIndexBuffer(imem);
+
+    if (!bgfx::isValid(vbh) || !bgfx::isValid(ibh))
+    {
+        spdlog::error("[Renderer] addMeshFromGltfToScene: VB/IB invalid");
+        return false;
+    }
+
+    MeshComp mc{};
+    mc.vbh = vbh;
+    mc.ibh = ibh;
+    mc.indexCount = (uint32_t)md.indices.size();
+    mc.state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | BGFX_STATE_MSAA | BGFX_STATE_DEPTH_TEST_LESS;
+
+    // 贴图（可选）
+    if (!md.baseColorTexPath.empty())
+    {
+        bgfx::TextureHandle htex =
+            createTexture2DFromFile(md.baseColorTexPath, /*srgb=*/false, samplerFlags_);
+        if (bgfx::isValid(htex))
+            mc.baseColor = htex;
+    }
+
+    scn.meshes.push_back(mc);
+    return true;
+}
+
+// ========== 渲染整个 Scene ==========
+void Renderer::renderScene(const Scene &scn)
+{
+    // 视口：不要依赖 Scene.viewportW/H（你的 Scene 没这俩），直接用 bgfx 当前帧缓冲大小
+    uint16_t vw = 1280, vh = 720;
+    if (const bgfx::Stats *st = bgfx::getStats())
+    {
+        vw = (uint16_t)st->width;
+        vh = (uint16_t)st->height;
+    }
+    bgfx::setViewClear(view_, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
+    bgfx::setViewRect(view_, 0, 0, vw, vh);
+
+    for (auto const &mc : scn.meshes)
+    {
+        bgfx::setState(mc.state);
+        bgfx::setVertexBuffer(0, mc.vbh);
+        bgfx::setIndexBuffer(mc.ibh);
+        if (bgfx::isValid(mc.baseColor) && bgfx::isValid(uSampler_))
+            bgfx::setTexture(0, uSampler_, mc.baseColor, samplerFlags_);
+
+        bgfx::submit(view_, programMesh_); // ← 若你的成员名不同，这里改成对应的 program
+    }
 }

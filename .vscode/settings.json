@@ -3,9 +3,24 @@
   "cmake.configurePreset": "vs2022-x64",
   "cmake.buildPreset": "vs2022-x64-RWD",
   "cmake.configureOnOpen": true,
+
+  // 建议开启 UTF-8 文件/终端感知
+  "files.encoding": "utf8",
+
+  // 1) 不再把 /utf-8 塞进 CL 环境变量 —— 删除这两行里的 CL
+  "cmake.buildEnvironment":     { "VSLANG": "1033" },
+  "cmake.configureEnvironment": { "VSLANG": "1033" },
+
+  // 2) 用 CMake 实参显式指定 MSVC 的 UTF-8/字符集旗标（更稳）
+  "cmake.configureArgs": [
+    "-DCMAKE_C_FLAGS=/utf-8 /source-charset:utf-8 /execution-charset:utf-8",
+    "-DCMAKE_CXX_FLAGS=/utf-8 /source-charset:utf-8 /execution-charset:utf-8",
+    "-DUNICODE=ON",
+    "-D_UNICODE=ON"
+  ],
+
   "C_Cpp.errorSquiggles": "disabled",
-  "cmake.buildEnvironment":     { "VSLANG": "1033", "CL": "/utf-8" },
-  "cmake.configureEnvironment": { "VSLANG": "1033", "CL": "/utf-8" },
+
   "files.associations": {
     "vector": "cpp",
     "algorithm": "cpp",

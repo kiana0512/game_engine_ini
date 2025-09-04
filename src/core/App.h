@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "gfx/Renderer.h"
 #include "gfx/Camera.h"
+#include "scene/Scene.h" 
 
 class App {
 public:
@@ -20,6 +21,7 @@ private:
 
     Renderer renderer_;
     Camera   camera_;
+    Scene    scene_; 
 
     // 状态
     bool running_   = false;
