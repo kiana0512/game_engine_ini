@@ -36,6 +36,7 @@ file(GLOB KE_SOURCES
   src/core/*.cpp
   src/gfx/*.cpp
   src/scene/*.cpp   # ← 修正：不要 ** 包裹
+  src/io/*.cpp 
 )
 add_executable(KEngine ${KE_SOURCES})
 

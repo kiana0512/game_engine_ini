@@ -137,6 +137,12 @@ void Renderer::shutdown()
     destroyGeometry();
     destroyPipelines();
     bgfx::shutdown();
+    for (auto &kv : texCache_)
+    {
+        if (bgfx::isValid(kv.second))
+            bgfx::destroy(kv.second);
+    }
+    texCache_.clear();
 }
 
 void Renderer::resize(int width, int height)
@@ -189,8 +195,9 @@ bool Renderer::createPipelines()
         .end();
 
     // 光照 uniform（留作扩展）
-    if (!bgfx::isValid(s_uLightDir))
-        s_uLightDir = bgfx::createUniform("u_lightDir", bgfx::UniformType::Vec4);
+    // 光照 uniform（用于 Mesh shader 的 Lambert 计算）
+    if (!bgfx::isValid(uLightDir_))
+        uLightDir_ = bgfx::createUniform("u_lightDir", bgfx::UniformType::Vec4);
 
     return true;
 }
@@ -359,6 +366,20 @@ bgfx::TextureHandle Renderer::createCheckerTexRGBA8(uint16_t w, uint16_t h, uint
     const bgfx::Memory *mem = bgfx::copy(pixels.data(), (uint32_t)pixels.size());
     return bgfx::createTexture2D(w, h, false, 1, bgfx::TextureFormat::RGBA8, 0, mem);
 }
+bgfx::TextureHandle Renderer::getOrLoadTexture(const std::string &path, bool srgb, uint32_t samplerFlags)
+{
+    auto it = texCache_.find(path);
+    if (it != texCache_.end() && bgfx::isValid(it->second))
+    {
+        return it->second; // 命中缓存
+    }
+    bgfx::TextureHandle h = createTexture2DFromFile(path, srgb, samplerFlags);
+    if (bgfx::isValid(h))
+    {
+        texCache_[path] = h;
+    }
+    return h;
+}
 
 // ========== 热重载 ==========
 void Renderer::hotReloadShaders()
@@ -509,7 +530,10 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
 // —— 渲染整个 Scene（Mesh 模式用这个） ——————————————————————————————
 void Renderer::renderScene(const Scene &scn, Camera &cam)
 {
-    // 1) HUD（可选）
+    // 1) 每帧更新 Scene（把 SRT 写入 model 矩阵）
+    const_cast<Scene &>(scn).update();
+
+    // 2) HUD（保留你 Day3 的显示即可）
     bgfx::dbgTextClear();
     if (showHelp_)
     {
@@ -517,7 +541,7 @@ void Renderer::renderScene(const Scene &scn, Camera &cam)
         bgfx::dbgTextPrintf(0, 2, 0x0a, "WASD move | Space up | C down | Shift sprint | RMB drag to look");
     }
 
-    // 2) 视口 & 清屏
+    // 3) 视口 & 清屏（保持 Day3）
     uint16_t vw = 1280, vh = 720;
     if (const bgfx::Stats *st = bgfx::getStats())
     {
@@ -528,18 +552,21 @@ void Renderer::renderScene(const Scene &scn, Camera &cam)
     bgfx::setViewClear(view_, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
     bgfx::setViewRect(view_, 0, 0, vw, vh);
 
-    // 3) 应用相机（关键！）
+    // 4) 应用相机
     cam.apply(view_);
     bgfx::touch(view_);
 
-    // 4) 遍历 Scene 的 MeshComp 并提交
+    // 5) 设置光照 uniform（方向 + 环境）
+    bgfx::setUniform(uLightDir_, lightDir_);
+
+    // 6) 提交场景中的所有网格
     for (auto const &mc : scn.meshes)
     {
         if (!bgfx::isValid(mc.vbh) || !bgfx::isValid(mc.ibh))
             continue;
 
         bgfx::setState(mc.state);
-        bgfx::setTransform(mc.model);
+        bgfx::setTransform(mc.model); // 来自 Scene.update()
         bgfx::setVertexBuffer(0, mc.vbh);
         bgfx::setIndexBuffer(mc.ibh);
 
@@ -550,11 +577,12 @@ void Renderer::renderScene(const Scene &scn, Camera &cam)
             bgfx::submit(view_, programMesh_);
     }
 
-    // 5) 结束一帧（统计可选）
+    // 7) 结束一帧（保持 Day3）
     bgfx::frame();
 }
 
 // —— 把 glTF 载入为 MeshComp 推到 Scene ——————————————————————————
+
 bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &scn)
 {
     MeshData md{};
@@ -584,11 +612,13 @@ bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &scn)
     MeshComp mc{};
     mc.vbh = vbh;
     mc.ibh = ibh;
-    mc.indexCount = (uint32_t)md.indices.size();
-    // mc.state 默认已含深度测试 | 写入 Z；如需双面可添加 BGFX_STATE_CULL_CW/BGFX_STATE_CULL_CCW 的关闭
-    // bx::mtxIdentity(mc.model); // 构造器已设为单位阵
+    mc.indexCount = static_cast<uint32_t>(md.indices.size());
+    // 默认渲染状态（深度写入 + 深度测试 + MSAA）
+    mc.state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | BGFX_STATE_MSAA | BGFX_STATE_DEPTH_TEST_LESS;
+    // 初始化变换矩阵为单位阵
+    bx::mtxIdentity(mc.model);
 
-    // 贴图（可选）
+    // —— GPU 贴图（实时渲染用）——
     if (!md.baseColorTexPath.empty())
     {
         bgfx::TextureHandle htex =
@@ -597,8 +627,32 @@ bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &scn)
             mc.baseColor = htex;
     }
 
-    scn.meshes.push_back(mc);
-    spdlog::info("[Renderer] addMeshFromGltfToScene: verts={} indices={}",
-                 md.vertices.size(), md.indices.size());
+    // —— CPU 缓存（给 Exporter 用）——
+    mc.cpuVertices.resize(md.vertices.size());
+    for (size_t i = 0; i < md.vertices.size(); ++i)
+    {
+        const auto &s = md.vertices[i];
+        auto &d = mc.cpuVertices[i];
+        d.px = s.px;
+        d.py = s.py;
+        d.pz = s.pz;
+        d.nx = s.nx;
+        d.ny = s.ny;
+        d.nz = s.nz;
+        d.u = s.u;
+        d.v = s.v;
+    }
+    mc.cpuIndices.resize(md.indices.size());
+    for (size_t i = 0; i < md.indices.size(); ++i)
+    {
+        mc.cpuIndices[i] = static_cast<uint32_t>(md.indices[i]);
+    }
+    mc.baseColorPath = md.baseColorTexPath; // 字符串保存贴图路径（Exporter 写 MTL 用）
+
+    // —— 加入场景 ——
+    scn.meshes.push_back(std::move(mc));
+
+    spdlog::info("[Renderer] addMeshFromGltfToScene: verts={} indices={} path={}",
+                 md.vertices.size(), md.indices.size(), path);
     return true;
 }

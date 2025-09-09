@@ -1,10 +1,12 @@
 #include "App.h"
 #include <spdlog/spdlog.h>
+#include <filesystem>           // ← 必须显式包含它
+namespace fs = std::filesystem; // ← 文件作用域 alias，后面直接用 fs::path
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
-
+#include "io/Exporter.h"
 bool App::init(int width, int height, const char *title)
 {
 #ifdef _WIN32
@@ -40,7 +42,8 @@ bool App::init(int width, int height, const char *title)
     {
         return false;
     }
-
+    // 初始化 bgfx 渲染器之后：
+    renderer_.setLightDir(-0.5f, -1.0f, -0.2f, 0.15f); // 方向从上往下，环境 0.15
     // 初始化相机
     camera_.setViewport(width_, height_);
     camera_.setMode(CameraMode::Perspective); // 默认透视，更符合 WASD 控制
@@ -100,10 +103,13 @@ void App::run()
         camCtl_.Update(dt);
 
         // --- 渲染 ---
-        if (draw_ == DrawMode::Mesh) {
+        if (draw_ == DrawMode::Mesh)
+        {
             // 使用 Scene 路径（M 键把网格推入 scene_）
             renderer_.renderScene(scene_, camera_);
-        } else {
+        }
+        else
+        {
             // 继续用直绘路径画三角/四边形（含 HUD）
             renderer_.renderFrame(camera_, lastDraws_, lastTris_, angle_);
         }
@@ -206,6 +212,24 @@ void App::handleKeyDown(SDL_Keycode key)
             spdlog::info("[App] Mesh added to Scene from {}", path);
         else
             spdlog::error("[App] Load mesh to Scene failed: {}", path);
+        break;
+    }
+    case SDLK_e:
+    {
+        fs::path outDir = fs::path(KE_ASSET_DIR) / ".." / "export";
+
+        std::error_code ec;
+        fs::create_directories(outDir, ec); // 即使存在也安全
+
+        fs::path outObj = outDir / "scene.obj";
+
+        scene_.update(); // 如需把 SRT 推成 model，这里同步一下
+
+        bool ok = exportSceneToOBJ(scene_, outObj.string(), "scene.mtl");
+        if (ok)
+            spdlog::info("[App] Exported OBJ to {}", outObj.string());
+        else
+            spdlog::error("[App] Export OBJ failed!");
         break;
     }
 
