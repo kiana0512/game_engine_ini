@@ -6,13 +6,11 @@
 #include <bgfx/bgfx.h>
 #include <bgfx/bgfx.h>
 
-// bgfx 新旧版本兼容：新版本是 vertexlayout.h，旧版本是 vertexdecl.h
-// 优先用公共入口头；不同版本内部会拉到 VertexLayout/VertexDecl
+// bgfx 新旧版本兼容：优先公共入口
 #if __has_include(<bgfx/bgfx.h>)
   #include <bgfx/bgfx.h>
   #include <bgfx/platform.h>
 #elif __has_include(<bgfx/vertexlayout.h>) || __has_include(<bgfx/vertexdecl.h>)
-  // 兼容极老版本拆分头
   #if __has_include(<bgfx/vertexlayout.h>)
     #include <bgfx/vertexlayout.h>
   #else
@@ -26,7 +24,7 @@
 
 #include <SDL.h>
 
-// 只做前置声明，避免循环包含
+// 前置声明
 struct Scene;
 class Camera;
 
@@ -35,7 +33,7 @@ enum class DrawMode : uint8_t
 {
     Simple,
     Tex,
-    Mesh,
+    Mesh,      // ← Mesh 模式将使用 Scene 路径
     Triangle,
     Quad
 };
@@ -45,12 +43,16 @@ class Renderer
 public:
     bool init(SDL_Window* window, int width, int height);
     bool loadTextureFromFile(const std::string& path);
-
     void shutdown();
 
-    // 供 App/Scene 调用的接口（实现放 .cpp）
-    void renderScene(const Scene& scene);
+    // Scene 路径：把 glTF 变为 MeshComp 推入 Scene
     bool addMeshFromGltfToScene(const std::string& path, Scene& scene);
+
+    // 主循环里调用：当 drawMode_ == Mesh 时，用 Scene 路径渲染
+    void renderScene(const Scene& scene, Camera& cam);
+
+    // 直绘路径（演示三角/四边形 & HUD），非 Mesh 时使用
+    void renderFrame(Camera& cam, uint32_t& outDraws, uint32_t& outTris, float angle);
 
     void resize(int width, int height);
     void setDebug(uint32_t flags);
@@ -62,10 +64,9 @@ public:
 
     void hotReloadShaders();
 
-    // 每帧渲染；返回统计（HUD）
-    void renderFrame(Camera& cam, uint32_t& outDraws, uint32_t& outTris, float angle);
-    void buildMeshLayout();
+    // 可选：把 glTF 直接加载到 Renderer 自己的 VB/IB（直绘 Mesh，用于快速验证）
     bool loadMeshFromGltf(const std::string& path);
+    void buildMeshLayout();
 
 private:
     void* nativeWindowHandle(SDL_Window* win);
@@ -86,7 +87,7 @@ private:
     int  width_ = 0, height_ = 0;
     uint32_t dbgFlags_ = 0;
 
-    // Program
+    // Program（基础）
     bgfx::ProgramHandle progColor_ = BGFX_INVALID_HANDLE;
     bgfx::ProgramHandle progTex_   = BGFX_INVALID_HANDLE;
 
@@ -112,10 +113,12 @@ private:
     bool useTex_  = false;
     bool showHelp_ = true;
 
-    // Mesh 管线资源
-    bgfx::ProgramHandle      programMesh_   = BGFX_INVALID_HANDLE;
-    bgfx::VertexBufferHandle meshVbh_       = BGFX_INVALID_HANDLE;
-    bgfx::IndexBufferHandle  meshIbh_       = BGFX_INVALID_HANDLE;
+    // Mesh 管线资源（Scene 路径与直绘 Mesh 共用的 shader）
+    bgfx::ProgramHandle      programMesh_    = BGFX_INVALID_HANDLE;
+
+    // —— 仅供“直绘 Mesh”演示使用（Scene 路径不会用到以下三个）
+    bgfx::VertexBufferHandle meshVbh_        = BGFX_INVALID_HANDLE;
+    bgfx::IndexBufferHandle  meshIbh_        = BGFX_INVALID_HANDLE;
     uint32_t                 meshIndexCount_ = 0;
     bool                     meshLoaded_     = false;
 };

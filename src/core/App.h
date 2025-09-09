@@ -6,6 +6,10 @@
 #include "gfx/Camera.h"
 #include "scene/Scene.h" 
 
+// 新增：输入与相机控制
+#include "scene/Input.h"
+#include "scene/CameraController.h"
+
 class App {
 public:
     bool init(int width, int height, const char* title);
@@ -22,6 +26,10 @@ private:
     Renderer renderer_;
     Camera   camera_;
     Scene    scene_; 
+
+    // 新增：输入系统与相机控制器
+    Input input_;
+    CameraController camCtl_{ &camera_, &input_ };
 
     // 状态
     bool running_   = false;

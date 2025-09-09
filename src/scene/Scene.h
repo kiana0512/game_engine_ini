@@ -1,38 +1,27 @@
 #pragma once
-#include <bgfx/bgfx.h>
 #include <vector>
-#include <string>
+#include <bgfx/bgfx.h>
+#include <bx/math.h>
 
-struct Transform {
-    float m[16]; // 世界矩阵（右手，行主序/列主序不重要，最终传 bgfx::setTransform 用即可）
+// 最小 Mesh 组件：VB/IB、可选贴图、状态、索引数、模型矩阵
+struct MeshComp
+{
+    bgfx::VertexBufferHandle vbh { BGFX_INVALID_HANDLE };
+    bgfx::IndexBufferHandle  ibh { BGFX_INVALID_HANDLE };
+    bgfx::TextureHandle      baseColor { BGFX_INVALID_HANDLE };
+    uint32_t                 indexCount = 0;
+    uint64_t                 state =
+        BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z |
+        BGFX_STATE_MSAA      | BGFX_STATE_DEPTH_TEST_LESS;
+
+    float model[16];
+    MeshComp() { bx::mtxIdentity(model); }
 };
 
-struct MeshComp {
-    bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
-    bgfx::IndexBufferHandle  ibh = BGFX_INVALID_HANDLE;
-    uint32_t indexCount = 0;
-    bgfx::TextureHandle baseColor = BGFX_INVALID_HANDLE;
-    uint64_t state = 0; // BGFX_STATE_*
-};
+struct Scene
+{
+    std::vector<MeshComp> meshes;
 
-struct CameraComp {
-    float view[16];
-    float proj[16];
-};
-
-struct LightDir {
-    float dir[3] = { -0.5f, -1.0f, -0.3f }; // 世界空间方向（已归一化）
-};
-
-struct Scene {
-    std::vector<Transform> transforms;
-    std::vector<MeshComp>  meshes;
-    CameraComp camera{};
-    LightDir   sun{};
-
-    size_t addMesh(const MeshComp& m, const Transform& t) {
-        meshes.push_back(m);
-        transforms.push_back(t);
-        return meshes.size()-1;
-    }
+    void clear() { meshes.clear(); } // 仅清容器，不负责销毁 bgfx 句柄
+    bool empty() const { return meshes.empty(); }
 };

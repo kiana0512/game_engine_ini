@@ -1,71 +1,67 @@
 #include "CameraController.h"
-#include <SDL.h>        // 若已在头文件包含，可去掉本行
-#include <bx/math.h>
-#include <cmath>        // std::sin / std::cos
+#include <algorithm>
+#include <cmath>
 
-// 将 float[3] 包装成 bx::Vec3，再调用 bgfx 的 mtxLookAt（修复 C2664）
-static inline void mtxLookAt_arr(float* out, const float* eye, const float* at)
-{
-    const bx::Vec3 eyeV  = { eye[0],  eye[1],  eye[2]  };
-    const bx::Vec3 atV   = { at[0],   at[1],   at[2]   };
-    const bx::Vec3 upV   = { 0.0f, 1.0f, 0.0f };
-    bx::mtxLookAt(out, eyeV, atV, upV, bx::Handedness::Right);
+// 一些局部向量工具
+static inline bx::Vec3 vadd(const bx::Vec3& a, const bx::Vec3& b) {
+    return bx::Vec3{ a.x + b.x, a.y + b.y, a.z + b.z };
+}
+static inline bx::Vec3 vscale(const bx::Vec3& v, float s) {
+    return bx::Vec3{ v.x * s, v.y * s, v.z * s };
+}
+static inline bx::Vec3 vsub(const bx::Vec3& a, const bx::Vec3& b) {
+    return bx::Vec3{ a.x - b.x, a.y - b.y, a.z - b.z };
 }
 
-static inline void mtxProj_persp(float* out, float fovYRadians, float aspect)
-{
-    bx::mtxProj(out, fovYRadians, aspect, 0.1f, 100.0f, true, bx::Handedness::Right);
+CameraController::CameraController(Camera* cam, Input* input)
+    : m_cam(cam), m_input(input) {}
+
+void CameraController::SetPose(const bx::Vec3& pos, float yaw, float pitch) {
+    m_pos = pos;
+    m_yaw = yaw;
+    m_pitch = pitch;
 }
 
-void CameraController::init(CameraComp* cam, int w, int h)
-{
-    cam_ = cam; vpw_ = w; vph_ = h;
-    rebuildViewProj();
-}
+void CameraController::Update(float dt) {
+    if (!m_cam || !m_input) return;
 
-void CameraController::onEvent(const SDL_Event& e)
-{
-    if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
-        rotating_ = true; lastX_ = e.button.x; lastY_ = e.button.y;
+    // 1) 鼠标右键拖拽：更新 yaw/pitch
+    if (m_input->IsDown(Action::CameraRotate)) {
+        int dx=0, dy=0;
+        m_input->GetMouseDelta(dx, dy);
+        m_yaw   -= dx * m_params.mouseSens; // 右移 -> 向右看
+        m_pitch -= dy * m_params.mouseSens; // 上移 -> 向上看
+        m_pitch = std::clamp(m_pitch, -m_params.pitchLimit, m_params.pitchLimit);
     }
-    if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
-        rotating_ = false;
+
+    // 2) 由 yaw/pitch 计算相机前/右/上
+    const float cy = std::cos(m_yaw), sy = std::sin(m_yaw);
+    const float cp = std::cos(m_pitch), sp = std::sin(m_pitch);
+
+    // 右手系：Z 指向前；与 bgfx/bx 默认一致
+    bx::Vec3 forward = { sy * cp, sp, -cy * cp };
+    bx::Vec3 right   = {  cy, 0.0f,  sy };
+    bx::Vec3 up      = { 0.0f, 1.0f, 0.0f };
+
+    // 3) 键盘：WASD/Space/C + Shift 冲刺
+    float speed = m_params.moveSpeed * (m_input->IsDown(Action::Sprint) ? m_params.sprintMul : 1.0f);
+    bx::Vec3 move{0,0,0};
+    if (m_input->IsDown(Action::MoveForward))  move = vadd(move, forward);
+    if (m_input->IsDown(Action::MoveBackward)) move = vsub(move, forward);
+    if (m_input->IsDown(Action::StrafeRight))  move = vadd(move, right);
+    if (m_input->IsDown(Action::StrafeLeft))   move = vsub(move, right);
+    if (m_input->IsDown(Action::MoveUp))       move = vadd(move, up);
+    if (m_input->IsDown(Action::MoveDown))     move = vsub(move, up);
+
+    // 归一化 + 位移
+    const float lenSq = move.x*move.x + move.y*move.y + move.z*move.z;
+    if (lenSq > 1e-6f) {
+        move = vscale(move, (1.0f/std::sqrt(lenSq)) * speed * dt);
+        m_pos = vadd(m_pos, move);
     }
-    if (e.type == SDL_MOUSEMOTION && rotating_) {
-        const int dx = e.motion.x - lastX_;
-        const int dy = e.motion.y - lastY_;
-        lastX_ = e.motion.x; lastY_ = e.motion.y;
-        yaw_   += dx * 0.01f;
-        pitch_ += dy * 0.01f;
-        pitch_  = bx::clamp(pitch_, -1.3f, 1.3f);
-        rebuildViewProj();
-    }
-    if (e.type == SDL_MOUSEWHEEL) {
-        dist_ *= (e.wheel.y > 0 ? 0.9f : 1.1f);
-        dist_  = bx::clamp(dist_, 0.5f, 20.0f);
-        rebuildViewProj();
-    }
-}
 
-void CameraController::update(float /*dt*/) {}
-
-void CameraController::rebuildViewProj()
-{
-    if (!cam_) return;
-
-    // 观测目标在原点
-    float at[3] = { 0.0f, 0.0f, 0.0f };
-
-    // 轨道相机的眼睛位置（右手系）
-    const float cx = std::cos(pitch_);
-    float eye[3] = {
-        dist_ * cx * std::cos(yaw_),
-        dist_ * std::sin(pitch_),
-        dist_ * cx * std::sin(yaw_)
-    };
-
-    mtxLookAt_arr(cam_->view, eye, at);
-
-    const float aspect = (vph_ != 0) ? (float)vpw_ / (float)vph_ : 1.0f;
-    mtxProj_persp(cam_->proj, bx::toRad(60.0f), aspect);
+    // 4) 仅设置“视图矩阵”，投影仍由 Camera 内部根据模式与视口生成
+    float view[16];
+    bx::mtxLookAt(view, m_pos, vadd(m_pos, forward), up, bx::Handedness::Right);
+    m_cam->setView(view);
 }

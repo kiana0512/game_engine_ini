@@ -1,191 +1,108 @@
-# K-Engine — Day 2
+# K-Engine 开发日志 - Day 3 总结
 
-一个用 **SDL2 + bgfx + CMake** 起步的学习型小引擎。  
-**Day 2 完成内容：**
-
-- 渲染管线抽拆：`core/App`、`gfx/Renderer`、`gfx/Camera`
-- 顶点/索引绘制：三角形与四边形（可切换）
-- 纹理采样：加载 `docs/image.png`，失败回落棋盘
-- **统一 varying 方案**：所有 shader 共享 `shaders/varying_all.def.sc`
-- Shader 热重载（按 **R**）
-- 调试 HUD 与开关（F1/F2/F3/…）
-- 预留 glTF 网格通道（`Renderer::loadMeshFromGltf`）
+## 🎯 Day 3 学习目标
+1. **Scene/组件层**  
+   - 实现最小的场景容器，可以挂载网格、相机。
+2. **Material/渲染管线**  
+   - 把贴图/光照等状态从 Renderer 内部分离，进入材质管理。
+3. **相机控制器**  
+   - 支持 WASD 移动、Shift 冲刺、Space/C 上下、右键拖拽旋转。
+4. **资源管理**  
+   - 最小缓存机制，避免重复加载 Texture/Mesh。
+5. **输入映射**  
+   - 将 SDL 输入抽象成 Action，便于未来扩展（手柄/配置文件）。
 
 ---
 
-## 0) 依赖 & 环境
+## 📂 新增/修改的文件结构
+src/
+├── core/
+│ ├── App.cpp / App.h # 主循环 + 事件处理
+├── gfx/
+│ ├── Renderer.cpp / Renderer.h # bgfx 渲染器，支持直绘与 Scene
+│ ├── Material.cpp / Material.h # 材质封装（状态/贴图）
+│ ├── GltfLoader.cpp / GltfLoader.h# glTF 模型加载
+├── scene/
+│ ├── Scene.cpp / Scene.h # 场景容器 + MeshComp
+│ ├── CameraController.cpp / .h # 相机控制器 (WASD + 鼠标)
+│ ├── Input.cpp / Input.h # 输入抽象 (ActionMap)
 
-- Windows + VS 2022
-- CMake ≥ 3.25
-- vcpkg（通过 `CMakePresets.json` 自动接入）
-- 包：`SDL2`、`spdlog`、`fmt`
-- 子模块：`extern/bgfx.cmake`（包含 `bx` / `bimg`）
+---
 
-首次克隆后初始化子模块：
-```bash
-git submodule update --init --recursive
-1) 目录结构
-K-Engine/
-├─ extern/                # 第三方（包含 bgfx.cmake 子模块）
-├─ shaders/               # 所有 shader 与统一 varying
-│  ├─ varying_all.def.sc  # ✅ Day 2：统一 varying
-│  ├─ vs_simple.sc / fs_simple.sc
-│  ├─ vs_tex.sc    / fs_tex.sc
-│  └─ vs_mesh.sc   / fs_mesh.sc
-├─ src/
-│  ├─ core/
-│  │  ├─ App.h / App.cpp         # 应用壳，消息循环/热重载
-│  └─ gfx/
-│     ├─ Camera.h / Camera.cpp   # 正交/透视，相机矩阵
-│     ├─ Renderer.h / Renderer.cpp
-│     ├─ shader_utils.h/.cpp     # 读取 .bin program
-│     ├─ TextureLoader.h/.cpp    # 从文件加载纹理（stb_image）
-│     └─ GltfLoader.h/.cpp       # glTF 解析（tinygltf）（预留）
-├─ docs/
-│  └─ image.png           # 示例贴图
-├─ CMakeLists.txt
-└─ CMakePresets.json
-2) 构建与运行
-# 生成
-cmake --preset vs2022-x64
+## 🖥️ 功能达成情况
 
-# 编译（含自动编译 shaders 并拷贝到 exe 同级 /shaders/dx11）
-cmake --build out/build/vs2022-x64 --config RelWithDebInfo
+### 1. 场景层
+- `Scene` 支持多个 `MeshComp`，每个包含：
+  - VB/IB
+  - 可选 BaseColor 贴图
+  - 模型矩阵
+- `Renderer::renderScene(scene, camera)` 遍历所有网格绘制。
 
-# 运行
-out/build/vs2022-x64/RelWithDebInfo/KEngine.exe
-若遇到 shader 相关莫名错误，建议 清空构建目录后全量重建：
-rmdir /s /q out\build\vs2022-x64
-cmake --preset vs2022-x64
-cmake --build out/build/vs2022-x64 --config RelWithDebInfo
-3) 运行时快捷键
+### 2. 渲染管线
+- 三套 shader 管线：
+  - `progColor_` → 纯顶点色
+  - `progTex_` → 纹理采样
+  - `programMesh_` → 网格 + 法线 + UV
+- `uSampler_` 统一采样贴图，支持 PNG / 棋盘格 / glTF BaseColor。
 
-R：热重载 shader（从 shaders/dx11/*.bin）
+### 3. 相机控制器
+- WASD 移动，Shift 冲刺，Space 上升，C 下降。
+- 鼠标右键拖拽旋转相机。
+- 限制 Pitch 防止相机翻转。
+- Camera 每帧更新 view/proj 并传入 bgfx。
 
-F1 / F2 / F3：切换 bgfx 调试面板（统计 / IFH / 仅文字）
+### 4. 资源管理
+- Texture → 自动加载或 fallback 棋盘格。
+- Mesh → glTF 加载后生成一次 VB/IB 并交给 bgfx。
+- 资源使用统一 layout，避免重复创建。
 
-H：显示/隐藏帮助文字
+### 5. 输入映射
+- 将 SDL 事件翻译为动作：
+  - `MoveForward/Back/Left/Right`
+  - `MoveUp/Down`
+  - `Sprint`
+  - `CameraRotate`
+- 结构支持后续扩展（手柄/配置文件）。
 
-1 / 2：三角形（非索引）/ 四边形（索引）
+---
 
-O / P：正交 / 透视相机
+## ⌨️ 热键一览
+- `R` → 热重载 Shader
+- `F1/F2/F3` → Debug 面板切换
+- `H` → 显隐帮助
+- `1 / 2` → 三角形 / 四边形
+- `3` → Mesh 模式 (Scene 渲染)
+- `O / P` → 正交 / 透视相机
+- `T` → 开关贴图
+- `L` → 重新加载 `docs/image.png`
+- `M` → 加载 `docs/models/model.gltf` 到场景
 
-4) Day 2 关键：统一 varying
+---
 
-为避免 v_texcoord0、v_color0 等“未声明”问题，所有 VS/FS 共用一份 varying：
+## 🧩 当前引擎具备的能力
+- 有了 **场景层** (Scene) 与 **渲染器** (Renderer) 的协作。
+- 支持 **多种绘制模式**：直绘三角/四边形、glTF 网格。
+- 有了 **相机控制器**，能像 Unity 编辑器一样飞行视角。
+- 输入抽象为 Action，后续能接手柄/键位映射。
+- 材质/贴图/网格已开始解耦。
 
-shaders/varying_all.def.sc
-// 统一的 varying，所有 VS/FS 共用；未使用的会被 shaderc 裁剪
-vec4 v_color0    : COLOR0;     // simple 用
-vec2 v_texcoord0 : TEXCOORD0;  // tex、mesh 用
-vec3 v_normal    : NORMAL;     // mesh（光照/NPR）用
-Shader 示例
+---
 
-shaders/vs_simple.sc
-$input  a_position, a_color0
-$output v_color0
-#include <bgfx_shader.sh>
+## 🔜 Day 4 展望
+下一步计划：
+1. **组件扩展**  
+   - 为 `MeshComp` 加 transform（平移/旋转/缩放）。
+   - 支持多个相机 / 光源。
+2. **光照入门**  
+   - 在 `vs_mesh/fs_mesh` 中加入简单 Lambert 漫反射。
+3. **资源管理进阶**  
+   - 引入资源缓存，避免重复加载贴图/网格。
+4. **HUD 扩展**  
+   - 在 HUD 中显示 FPS、相机位置等 debug 信息。
 
-uniform mat4 u_modelViewProj;
+---
 
-void main() {
-  gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
-  v_color0    = a_color0;
-}
-shaders/fs_simple.sc
-
-$input v_color0
-#include <bgfx_shader.sh>
-
-void main() { gl_FragColor = v_color0; }
-
-
-shaders/vs_mesh.sc
-
-$input  a_position, a_normal, a_texcoord0
-$output v_texcoord0, v_normal
-#include <bgfx_shader.sh>
-
-uniform mat4 u_modelViewProj;
-
-void main() {
-  gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
-  v_texcoord0 = a_texcoord0;
-  v_normal    = a_normal;
-}
-
-
-shaders/fs_mesh.sc
-
-$input v_texcoord0, v_normal
-#include <bgfx_shader.sh>
-
-SAMPLER2D(s_texColor, 0);
-
-void main() {
-  vec4 base = texture2D(s_texColor, v_texcoord0);
-  gl_FragColor = base;
-}
-
-
-CMake（片段） —— 确保所有 shader 都指定了同一份 varying：
-
-# 使用统一的 varying_all.def.sc
-bgfx_shader_multi_with_varying(VS_SIMPLE_BINS vs_simple v ${SHADER_DIR}/varying_all.def.sc)
-bgfx_shader_multi_with_varying(FS_SIMPLE_BINS fs_simple f ${SHADER_DIR}/varying_all.def.sc)
-bgfx_shader_multi_with_varying(VS_TEX_BINS    vs_tex    v ${SHADER_DIR}/varying_all.def.sc)
-bgfx_shader_multi_with_varying(FS_TEX_BINS    fs_tex    f ${SHADER_DIR}/varying_all.def.sc)
-bgfx_shader_multi_with_varying(VS_MESH_BINS   vs_mesh   v ${SHADER_DIR}/varying_all.def.sc)
-bgfx_shader_multi_with_varying(FS_MESH_BINS   fs_mesh   f ${SHADER_DIR}/varying_all.def.sc)
-
-
-务必删除 旧的 bgfx_shader_multi(vs_mesh ...) / (fs_mesh ...)，避免继续引用默认 varying.def.sc。
-
-5) 常见问题
-Q1：undeclared identifier 'v_texcoord0' / 'v_color0'
-
-所有 shader 统一使用 shaders/varying_all.def.sc
-
-CMake 编译命令里都要传 --varyingdef varying_all.def.sc
-
-清理构建目录后重新生成
-
-Q2：只看到统计面板没有画面
-
-面板会遮挡画面，改用 F3 仅文字 或默认 BGFX_DEBUG_TEXT
-
-左上角 HUD 用 dbgTextPrintf() 显示上一帧统计
-
-Q3：贴图不显示
-
-程序尝试加载 docs/image.png；失败则用棋盘纹理
-
-控制台查看 spdlog 输出（UTF-8）
-
-6) 开发提示
-
-最小可运行优先：每加一项功能都保证可运行、可观察（快捷键/日志/HUD）
-
-资源路径通过宏注入：
-
-KE_SHADER_DIR：构建目录的 shaders/
-
-KE_ASSET_DIR：源库 docs/（示例图片）
-
-Shader 改动 → 按 R 热重载，无需重启程序
-
-7) Day 3 路线（预告）
-
-真实绘制 glTF 网格（位置/法线/UV → VBO/IBO）
-
-统一网格顶点布局（与 varying_all.def.sc 对齐）
-
-sRGB、采样器、重复/镜像、双线性
-
-简单 NPR/三渲二：法线外扩描边 + Toon 分段
-
-Blender → glTF 导出建议（法线、切线、单位、Y 轴向上）
-
-8) 许可证
-
-仅用于学习与交流；第三方库遵循各自许可证。
+📌 **总结**  
+Day 3 阶段我们完成了：场景容器、材质封装、相机控制、输入抽象、资源加载。  
+现在引擎已经进入一个“小型引擎”的雏形，可以加载 glTF 模型并通过相机自由浏览。  
+下一步 Day 4 我们将进入 **光照 & 组件扩展**，让画面更有真实感。
