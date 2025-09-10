@@ -136,6 +136,17 @@ void Renderer::shutdown()
     destroyTexture();
     destroyGeometry();
     destroyPipelines();
+    if (bgfx::isValid(uPointPosRad_))
+    {
+        bgfx::destroy(uPointPosRad_);
+        uPointPosRad_ = BGFX_INVALID_HANDLE;
+    }
+    if (bgfx::isValid(uPointColInt_))
+    {
+        bgfx::destroy(uPointColInt_);
+        uPointColInt_ = BGFX_INVALID_HANDLE;
+    }
+
     bgfx::shutdown();
     for (auto &kv : texCache_)
     {
@@ -552,12 +563,33 @@ void Renderer::renderScene(const Scene &scn, Camera &cam)
     bgfx::setViewClear(view_, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
     bgfx::setViewRect(view_, 0, 0, vw, vh);
 
-    // 4) 应用相机
+    // 4) 应用相机（设置 view/proj 矩阵等）
     cam.apply(view_);
     bgfx::touch(view_);
 
-    // 5) 设置光照 uniform（方向 + 环境）
-    bgfx::setUniform(uLightDir_, lightDir_);
+    // 5) 光照 uniform（与你 fs_mesh.sc 对齐）
+    //    u_lightDir: xyz=方向(指向物体)，w=环境光强度[0,1]
+    if (bgfx::isValid(uLightDir_))
+    {
+        bgfx::setUniform(uLightDir_, lightDir_);
+    }
+
+    //    点光（可选）：u_pointPosRad / u_pointColInt
+    //    若未启用或句柄无效，则传 0 向量，保证不影响现有渲染
+    float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (bgfx::isValid(uPointPosRad_) && bgfx::isValid(uPointColInt_) && pointEnabled_)
+    {
+        bgfx::setUniform(uPointPosRad_, &pointPosRad_[0]); // pos.xyz, radius
+        bgfx::setUniform(uPointColInt_, &pointColInt_[0]); // color.xyz, intensity
+    }
+    else
+    {
+        if (bgfx::isValid(uPointPosRad_))
+            bgfx::setUniform(uPointPosRad_, zero4);
+        if (bgfx::isValid(uPointColInt_))
+            bgfx::setUniform(uPointColInt_, zero4);
+    }
 
     // 6) 提交场景中的所有网格
     for (auto const &mc : scn.meshes)
@@ -565,14 +597,17 @@ void Renderer::renderScene(const Scene &scn, Camera &cam)
         if (!bgfx::isValid(mc.vbh) || !bgfx::isValid(mc.ibh))
             continue;
 
+        // 渲染状态（保留你每个 mesh 的自定义 state）
         bgfx::setState(mc.state);
         bgfx::setTransform(mc.model); // 来自 Scene.update()
         bgfx::setVertexBuffer(0, mc.vbh);
         bgfx::setIndexBuffer(mc.ibh);
 
+        // 贴图（槽位0，采样器与 fs_mesh.sc 的 s_texColor 对齐）
         if (bgfx::isValid(mc.baseColor) && bgfx::isValid(uSampler_))
             bgfx::setTexture(0, uSampler_, mc.baseColor, samplerFlags_);
 
+        // 提交
         if (bgfx::isValid(programMesh_))
             bgfx::submit(view_, programMesh_);
     }
@@ -655,4 +690,26 @@ bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &scn)
     spdlog::info("[Renderer] addMeshFromGltfToScene: verts={} indices={} path={}",
                  md.vertices.size(), md.indices.size(), path);
     return true;
+}
+void Renderer::setPointLightEnabled(bool enabled)
+{
+    pointEnabled_ = enabled;
+    if (!enabled)
+    {
+        pointPosRad_[0] = pointPosRad_[1] = pointPosRad_[2] = pointPosRad_[3] = 0.0f;
+        pointColInt_[0] = pointColInt_[1] = pointColInt_[2] = pointColInt_[3] = 0.0f;
+    }
+}
+
+void Renderer::setPointLight(float px, float py, float pz, float radius,
+                             float cr, float cg, float cb, float intensity)
+{
+    pointPosRad_[0] = px;
+    pointPosRad_[1] = py;
+    pointPosRad_[2] = pz;
+    pointPosRad_[3] = (radius > 0.f ? radius : 0.f);
+    pointColInt_[0] = cr;
+    pointColInt_[1] = cg;
+    pointColInt_[2] = cb;
+    pointColInt_[3] = (intensity > 0.f ? intensity : 0.f);
 }
