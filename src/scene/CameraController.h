@@ -1,5 +1,5 @@
 #pragma once
-#include "../gfx/Camera.h"
+#include "../gfx/camera/Camera.h"
 #include "Input.h"
 #include <bx/math.h>
 

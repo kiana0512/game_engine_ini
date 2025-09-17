@@ -3,7 +3,7 @@
 #include <string>
 #include <cstdint>
 #include "gfx/Renderer.h"
-#include "gfx/Camera.h"
+#include "gfx/camera/Camera.h"
 #include "scene/Scene.h" 
 
 // 新增：输入与相机控制

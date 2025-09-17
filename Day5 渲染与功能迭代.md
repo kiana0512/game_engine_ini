@@ -51,3 +51,7 @@
   // 点光参数（数组）
   void setPointLight(const float pos[3], float radius,
                      const float color[3], float intensity);
+
+
+cmake --preset vs2022-x64 -Wno-dev --fresh
+cmake --build --preset vs2022-x64-RWD -j

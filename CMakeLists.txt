@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.25)
-
 project(KEngine LANGUAGES CXX)
 
 # --------------------------------------------------------------------------
@@ -12,31 +11,28 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 # --------------------------------------------------------------------------
-# vcpkg 三方库
+# 第三方库（vcpkg）
 # --------------------------------------------------------------------------
 find_package(SDL2 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+# glm：优先 config 包，找不到则头文件兜底
+find_package(glm CONFIG QUIET)
 
 # --------------------------------------------------------------------------
-# bgfx 子模块（只开 tools 以便构建 shaderc）
+# bgfx 子模块（只开 tools 用于 shaderc）
 # --------------------------------------------------------------------------
 set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BGFX_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
 set(BGFX_CUSTOM_TARGETS OFF CACHE BOOL "" FORCE)
-# 替换你原来的 add_subdirectory(extern/bgfx.cmake)
 add_subdirectory(extern/bgfx.cmake EXCLUDE_FROM_ALL)
 
 # --------------------------------------------------------------------------
 # 源码
 # --------------------------------------------------------------------------
-file(GLOB KE_SOURCES
+file(GLOB_RECURSE KE_SOURCES CONFIGURE_DEPENDS
   src/*.cpp
-  src/core/*.cpp
-  src/gfx/*.cpp
-  src/scene/*.cpp   # ← 修正：不要 ** 包裹
-  src/io/*.cpp 
 )
 add_executable(KEngine ${KE_SOURCES})
 
@@ -49,7 +45,6 @@ target_include_directories(KEngine PRIVATE
 # --------------------------------------------------------------------------
 # 连接三方库
 # --------------------------------------------------------------------------
-# 兼容不同命名方式（有的带命名空间）
 if(TARGET bgfx::bgfx)
   set(_bgfx bgfx::bgfx)
 else()
@@ -73,7 +68,28 @@ target_link_libraries(KEngine PRIVATE
   nlohmann_json::nlohmann_json
 )
 
-# 兜底：极少数版本不会把 include 目录从 bgfx target 传递出来，这里手动补一次
+# glm 处理：优先 target，其次仅 include 目录
+if(TARGET glm::glm)
+  target_link_libraries(KEngine PRIVATE glm::glm)
+elseif(TARGET glm::glm-header-only)
+  target_link_libraries(KEngine PRIVATE glm::glm-header-only)
+else()
+  find_path(GLM_INCLUDE_DIR NAMES glm/glm.hpp
+            PATHS $ENV{VCPKG_ROOT}/installed/$ENV{VCPKG_DEFAULT_TRIPLET}
+            PATH_SUFFIXES include
+            NO_DEFAULT_PATH)
+  if(NOT GLM_INCLUDE_DIR)
+    find_path(GLM_INCLUDE_DIR NAMES glm/glm.hpp) # 全局路径兜底
+  endif()
+  if(GLM_INCLUDE_DIR)
+    message(STATUS "GLM headers: ${GLM_INCLUDE_DIR}")
+    target_include_directories(KEngine PRIVATE ${GLM_INCLUDE_DIR})
+  else()
+    message(FATAL_ERROR "GLM not found. Install via: vcpkg install glm:x64-windows, or set GLM_INCLUDE_DIR.")
+  endif()
+endif()
+
+# 兜底：极少数 bgfx 端口不传 include 目录
 get_target_property(_bgfx_incs ${_bgfx} INTERFACE_INCLUDE_DIRECTORIES)
 if(NOT _bgfx_incs)
   target_include_directories(KEngine PRIVATE
@@ -84,15 +100,18 @@ if(NOT _bgfx_incs)
 endif()
 
 # --------------------------------------------------------------------------
-# MSVC 编译选项（目标级设置，避免影响外部子工程）
+# MSVC 设置
 # --------------------------------------------------------------------------
 if(MSVC)
   target_compile_definitions(KEngine PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
   target_compile_options(KEngine PRIVATE /utf-8)
+
+  # VS 的 C 编译器 TryCompile 可能叠加 /utf-8 与 /source-charset:utf-8，做个温和规避
+  string(REPLACE "/utf-8" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 endif()
 
 # --------------------------------------------------------------------------
-# Shaders（统一输出到 ${CMAKE_BINARY_DIR}/shaders/{dx11,spirv,glsl}）
+# Shaders（输出到 ${CMAKE_BINARY_DIR}/shaders/{dx11,spirv,glsl}）
 # --------------------------------------------------------------------------
 set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(SHADER_OUT ${CMAKE_BINARY_DIR}/shaders)
@@ -117,7 +136,7 @@ function(bgfx_shader_multi_with_varying OUT NAME TYPE VARYING_FILE)
     COMMENT "Compiling ${NAME}.sc -> dx11/${NAME}.bin"
     VERBATIM
   )
-  # SPIR-V (Vulkan)
+  # SPIR-V
   add_custom_command(
     OUTPUT ${SHADER_OUT}/spirv/${NAME}.bin
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}/spirv
@@ -133,7 +152,7 @@ function(bgfx_shader_multi_with_varying OUT NAME TYPE VARYING_FILE)
     COMMENT "Compiling ${NAME}.sc -> spirv/${NAME}.bin"
     VERBATIM
   )
-  # OpenGL (GLSL 1.50)
+  # OpenGL 150
   add_custom_command(
     OUTPUT ${SHADER_OUT}/glsl/${NAME}.bin
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}/glsl
@@ -159,6 +178,7 @@ endfunction()
 
 set(VARYING_FILE ${SHADER_DIR}/varying.def.sc)
 
+# 旧演示路径
 bgfx_shader_multi_with_varying(VS_SIMPLE_BINS vs_simple v ${VARYING_FILE})
 bgfx_shader_multi_with_varying(FS_SIMPLE_BINS fs_simple f ${VARYING_FILE})
 bgfx_shader_multi_with_varying(VS_TEX_BINS    vs_tex    v ${VARYING_FILE})
@@ -166,16 +186,21 @@ bgfx_shader_multi_with_varying(FS_TEX_BINS    fs_tex    f ${VARYING_FILE})
 bgfx_shader_multi_with_varying(VS_MESH_BINS   vs_mesh   v ${VARYING_FILE})
 bgfx_shader_multi_with_varying(FS_MESH_BINS   fs_mesh   f ${VARYING_FILE})
 
+# Day6：PBR 前向管线
+bgfx_shader_multi_with_varying(VS_PBR_BINS    vs_pbr    v ${VARYING_FILE})
+bgfx_shader_multi_with_varying(FS_PBRMR_BINS  fs_pbr_mr f ${VARYING_FILE})
+
 set(SHADER_BINARIES
   ${VS_SIMPLE_BINS} ${FS_SIMPLE_BINS}
   ${VS_TEX_BINS}    ${FS_TEX_BINS}
   ${VS_MESH_BINS}   ${FS_MESH_BINS}
+  ${VS_PBR_BINS}    ${FS_PBRMR_BINS}
 )
 
 add_custom_target(build_shaders ALL DEPENDS ${SHADER_BINARIES})
 add_dependencies(KEngine build_shaders)
 
-# 运行时宏：Shader 输出与资源目录
+# 运行时宏
 target_compile_definitions(KEngine PRIVATE
   KE_SHADER_DIR=\"${SHADER_OUT}\"
   KE_ASSET_DIR=\"${CMAKE_SOURCE_DIR}/docs\"

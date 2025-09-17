@@ -1,5 +1,5 @@
 #include "ResourceCache.h"
-#include "TextureLoader.h"  // 你现有的创建函数
+#include "gfx/texture/TextureLoader.h"
 #include <bgfx/bgfx.h>
 
 bgfx::TextureHandle ResourceCache::getTexture2D(const std::string& path, bool flipY) {
