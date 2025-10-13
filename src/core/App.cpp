@@ -1,4 +1,5 @@
 #include "App.h"
+#include "scene/OrbitController.h"
 
 // 第三方库
 #include <spdlog/spdlog.h>
@@ -9,29 +10,40 @@
 #include "core/FrameTimer.h"
 
 #ifdef _WIN32
-  #define NOMINMAX
-  #include <windows.h>
+#define NOMINMAX
+#include <windows.h>
 #endif
 
 #include "io/Exporter.h"
+namespace ke
+{
+    struct OrbitViewSnapshot
+    {
+        float eye[3]{0.0f, 0.0f, -2.5f};
+        float at[3]{0.0f, 0.0f, 0.0f};
+        float up[3]{0.0f, 1.0f, 0.0f};
+    };
+    OrbitViewSnapshot g_orbitView;  // 供 Renderer 读取
+    static OrbitController g_orbit; // 只在本翻译单元使用
+}
 
 // 给 std::filesystem 起别名，写起来更简洁
 namespace fs = std::filesystem;
 
 // ===== 文件作用域静态对象（只在本 .cpp 可见） =====
-static ke::FrameTimer gTimer;     // 帧计时器（程序启动构造、退出析构）
-static double gPrintAccum = 0.0;  // 打印节流器（累计到 1s 打印一次）
+static ke::FrameTimer gTimer;    // 帧计时器（程序启动构造、退出析构）
+static double gPrintAccum = 0.0; // 打印节流器（累计到 1s 打印一次）
 
 // 点光参数（运行时可按键调整）
-static bool  sPointOn       = false;
-static float sPointPos[3]   = { 2.0f, 2.0f, 2.0f };
-static float sPointRadius   = 5.0f;
-static float sPointColor[3] = { 1.0f, 1.0f, 1.0f };
-static float sPointIntensity= 3.0f;
+static bool sPointOn = false;
+static float sPointPos[3] = {2.0f, 2.0f, 2.0f};
+static float sPointRadius = 5.0f;
+static float sPointColor[3] = {1.0f, 1.0f, 1.0f};
+static float sPointIntensity = 3.0f;
 
 // ===================================================
 
-bool App::init(int width, int height, const char* title)
+bool App::init(int width, int height, const char *title)
 {
 #ifdef _WIN32
     // Windows 控制台设置为 UTF-8，防止中文日志乱码
@@ -39,7 +51,7 @@ bool App::init(int width, int height, const char* title)
     SetConsoleCP(CP_UTF8);
 #endif
 
-    width_  = width;
+    width_ = width;
     height_ = height;
 
     // 高 DPI 策略（每监视器 DPI 感知）
@@ -55,8 +67,7 @@ bool App::init(int width, int height, const char* title)
         title,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         width_, height_,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-    );
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window_)
     {
         spdlog::error("SDL_CreateWindow failed: {}", SDL_GetError());
@@ -89,7 +100,13 @@ bool App::init(int width, int height, const char* title)
     renderer_.setDebug(dbgFlags_);
 
     // 相机初始位姿
-    camCtl_.SetPose({ 0.0f, 1.6f, 3.0f }, 0.0f, 0.0f);
+    camCtl_.SetPose({0.0f, 1.6f, 3.0f}, 0.0f, 0.0f);
+
+    // 轨道相机初始状态（目标点略抬高一点更直观）
+    ke::g_orbit.setTarget({0.0f, 0.7f, 0.0f});
+    ke::g_orbit.setDistance(3.0f);
+    ke::g_orbit.setDistanceRange(0.2f, 100.0f);
+    ke::g_orbit.setPitchRangeDeg(-85.0f, +85.0f);
 
     return true;
 }
@@ -111,10 +128,10 @@ void App::run()
                 running_ = false;
 
             if (e.type == SDL_WINDOWEVENT &&
-               (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-                e.window.event == SDL_WINDOWEVENT_RESIZED))
+                (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                 e.window.event == SDL_WINDOWEVENT_RESIZED))
             {
-                width_  = e.window.data1;
+                width_ = e.window.data1;
                 height_ = e.window.data2;
                 renderer_.resize(width_, height_);
                 camera_.setViewport(width_, height_);
@@ -124,11 +141,41 @@ void App::run()
                 handleKeyDown(e.key.keysym.sym);
 
             input_.HandleSDLEvent(e);
+
+            switch (e.type)
+            {
+            case SDL_MOUSEBUTTONDOWN:
+                if (e.button.button == SDL_BUTTON_RIGHT)
+                {
+                    ke::g_orbit.beginDrag(ke::OrbitButton::Right);
+                }
+                break;
+            case SDL_MOUSEBUTTONUP:
+                if (e.button.button == SDL_BUTTON_RIGHT)
+                {
+                    ke::g_orbit.endDrag();
+                }
+                break;
+            case SDL_MOUSEMOTION:
+                if (e.motion.state & SDL_BUTTON_RMASK)
+                {
+                    // 像素 → 角度比例内部已考虑：这里只传相对像素
+                    ke::g_orbit.dragDelta(static_cast<float>(e.motion.xrel),
+                                          static_cast<float>(e.motion.yrel));
+                }
+                break;
+            case SDL_MOUSEWHEEL:
+                // SDL：上滚 +1、下滚 -1；控制器内部解释为“正 = 拉近”
+                ke::g_orbit.onScroll(static_cast<float>(e.wheel.y));
+                break;
+            default:
+                break;
+            }
         }
 
         // ---- 计算 dt（秒）+ 每秒打印一次性能信息 ----
-        const double dt = gTimer.tick();                 // 本帧耗时（秒）
-        angle_ += static_cast<float>(dt);                // demo 自旋转
+        const double dt = gTimer.tick();  // 本帧耗时（秒）
+        angle_ += static_cast<float>(dt); // demo 自旋转
 
         gPrintAccum += dt;
         if (gPrintAccum >= 1.0)
@@ -140,6 +187,28 @@ void App::run()
 
         // ---- 相机控制更新（与帧率无关，基于 dt）----
         camCtl_.Update(static_cast<float>(dt));
+        
+        // ---- 轨道相机更新 ----
+        ke::g_orbit.update(dt);
+
+        // 写出本帧视角（Renderer 会读取它来设定 view/proj）
+        {
+            const auto e = ke::g_orbit.eye();
+            const auto a = ke::g_orbit.at();
+            const auto u = ke::g_orbit.up();
+            ke::g_orbitView.eye[0] = e.x;
+            ke::g_orbitView.eye[1] = e.y;
+            ke::g_orbitView.eye[2] = e.z;
+            ke::g_orbitView.at[0] = a.x;
+            ke::g_orbitView.at[1] = a.y;
+            ke::g_orbitView.at[2] = a.z;
+            ke::g_orbitView.up[0] = u.x;
+            ke::g_orbitView.up[1] = u.y;
+            ke::g_orbitView.up[2] = u.z;
+
+            // （可选）把眼睛位置同步给 PBR 的 viewPos（已有接口）
+            renderer_.setViewPos(e.x, e.y, e.z);
+        }
 
         // ---- 渲染路径 ----
         if (draw_ == DrawMode::Mesh)
