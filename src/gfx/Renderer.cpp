@@ -11,6 +11,7 @@
 #include "gfx/shaders/shader_utils.h"
 #include "gfx/texture/TextureLoader.h"
 #include "io/gltf/GltfLoader.h" // 用你的加载器
+#include "material/PbrMaterial.h"
 
 // 简易 HUD：打印当前通路与光照/统计
 static void dbgHudPrint(const char *pathName,
@@ -34,6 +35,182 @@ static void dbgHudPrint(const char *pathName,
                         pointColIntensity[3]);
     bgfx::dbgTextPrintf(0, 5, 0x0f, "Exposure: %.2f", exposure);
 }
+// ==== Debug Grid (XZ plane, Y = gridY) ====
+// 用 transient VB/IB 画地面栅格；兼容 bgfx 旧接口（allocTransient* 返回 void）
+static void drawDebugGrid_(uint8_t viewId,
+                           bgfx::ProgramHandle prog,       // 用 programSimple_
+                           int halfLines = 10,             // 正负各多少条（总共 2*halfLines+1）
+                           float step = 0.5f,              // 邻线间距
+                           float gridY = 0.0f,             // 网格高度
+                           int majorEvery = 5,             // 每 N 条一根主栅格
+                           uint32_t colMinor = 0x40FFFFFF, // ABGR：次栅格（半透明白）
+                           uint32_t colMajor = 0x80FFFFFF) // ABGR：主栅格（更亮）
+{
+    if (!bgfx::isValid(prog) || halfLines < 0 || step <= 0.0f)
+        return;
+
+    struct Vtx
+    {
+        float x, y, z;
+        uint32_t abgr;
+    };
+
+    // 顶点布局：Position + Color0
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 4, bgfx::AttribType::Uint8, true)
+        .end();
+
+    const int linesPerDir = 2 * halfLines + 1;
+    const int totalLines = linesPerDir * 2; // X方向 + Z方向
+    const uint32_t vcount = totalLines * 2; // 每条线2个顶点
+    const uint32_t icount = totalLines * 2; // 每条线2个索引（线段）
+
+    // 旧接口：allocTransient* 返回 void，先检查可用容量
+    if (bgfx::getAvailTransientVertexBuffer(vcount, layout) < vcount ||
+        bgfx::getAvailTransientIndexBuffer(icount) < icount)
+    {
+        return; // 本帧暂时资源不够，直接跳过
+    }
+
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, vcount, layout);
+    bgfx::allocTransientIndexBuffer(&tib, icount);
+
+    auto *vtx = reinterpret_cast<Vtx *>(tvb.data);
+    auto *idx = reinterpret_cast<uint16_t *>(tib.data);
+
+    const float extent = halfLines * step;
+    uint32_t vi = 0, ii = 0;
+
+    // —— 平行 X 轴的线（随 Z 改变）
+    for (int i = -halfLines; i <= halfLines; ++i)
+    {
+        const float z = i * step;
+        const bool isMajor = (majorEvery > 0) && (i % majorEvery == 0);
+        const uint32_t col = isMajor ? colMajor : colMinor;
+
+        vtx[vi + 0] = {-extent, gridY, z, col};
+        vtx[vi + 1] = {+extent, gridY, z, col};
+        idx[ii + 0] = static_cast<uint16_t>(vi + 0);
+        idx[ii + 1] = static_cast<uint16_t>(vi + 1);
+        vi += 2;
+        ii += 2;
+    }
+
+    // —— 平行 Z 轴的线（随 X 改变）
+    for (int i = -halfLines; i <= halfLines; ++i)
+    {
+        const float x = i * step;
+        const bool isMajor = (majorEvery > 0) && (i % majorEvery == 0);
+        const uint32_t col = isMajor ? colMajor : colMinor;
+
+        vtx[vi + 0] = {x, gridY, -extent, col};
+        vtx[vi + 1] = {x, gridY, +extent, col};
+        idx[ii + 0] = static_cast<uint16_t>(vi + 0);
+        idx[ii + 1] = static_cast<uint16_t>(vi + 1);
+        vi += 2;
+        ii += 2;
+    }
+
+    float I[16];
+    bx::mtxIdentity(I);
+    bgfx::setTransform(I);
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+
+    const uint64_t state =
+        BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
+        BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS |
+        BGFX_STATE_PT_LINES; // 线段拓扑
+
+    bgfx::setState(state);
+    bgfx::submit(viewId, prog);
+}
+// ==== AABB vs Frustum, clip-space 方案 ====
+// 输入：PV = P * V，模型矩阵 M，物体空间AABB(min/max)，以及是否 homogeneousDepth
+// 算法：把 AABB 8 个角点用 C = PV*M 变换到裁剪空间，
+//       若有任意一个“平面”能把全部8个点放到外侧 => 完全在视锥外（不可见）；否则可见。
+static inline void mtxMul_(float out[16], const float a[16], const float b[16])
+{
+    bx::mtxMul(out, a, b); // out = a * b  （bx 的乘法定义）
+}
+static inline void mulPos_(float out[4], const float m[16], float x, float y, float z)
+{
+    // 列主序；同 bx::mtx* 约定
+    out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+    out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+    out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    out[3] = m[3] * x + m[7] * y + m[11] * z + m[15];
+}
+static bool aabbVisible_(const float pv[16], const float model[16],
+                         const float bmin[3], const float bmax[3],
+                         bool homogeneousDepth)
+{
+    // C = PV * M
+    float c[16];
+    mtxMul_(c, pv, model);
+
+    // 8个角点
+    const float xs[2] = {bmin[0], bmax[0]};
+    const float ys[2] = {bmin[1], bmax[1]};
+    const float zs[2] = {bmin[2], bmax[2]};
+
+    // 统计：对每个裁剪平面，若全部8点都在外侧 => 不可见
+    int outsideLeft = 0, outsideRight = 0, outsideBottom = 0, outsideTop = 0, outsideNear = 0, outsideFar = 0;
+
+    for (int ix = 0; ix < 2; ++ix)
+        for (int iy = 0; iy < 2; ++iy)
+            for (int iz = 0; iz < 2; ++iz)
+            {
+                float p[4];
+                mulPos_(p, c, xs[ix], ys[iy], zs[iz]); // 裁剪空间坐标 (x,y,z,w)
+
+                const float x = p[0], y = p[1], z = p[2], w = p[3];
+
+                // 6个平面：x in [-w, w], y in [-w, w], z in [zn, w]
+                if (x < -w)
+                    ++outsideLeft;
+                if (x > w)
+                    ++outsideRight;
+                if (y < -w)
+                    ++outsideBottom;
+                if (y > w)
+                    ++outsideTop;
+
+                if (homogeneousDepth)
+                { // OpenGL风格：z in [-w, w]
+                    if (z < -w)
+                        ++outsideNear;
+                    if (z > w)
+                        ++outsideFar;
+                }
+                else
+                { // D3D风格：z in [0, w]
+                    if (z < 0)
+                        ++outsideNear;
+                    if (z > w)
+                        ++outsideFar;
+                }
+            }
+
+    if (outsideLeft == 8)
+        return false;
+    if (outsideRight == 8)
+        return false;
+    if (outsideBottom == 8)
+        return false;
+    if (outsideTop == 8)
+        return false;
+    if (outsideNear == 8)
+        return false;
+    if (outsideFar == 8)
+        return false;
+
+    return true; // 没有任何一个平面把所有角点都排除 => 有交/在内，可见
+}
 
 namespace ke
 {
@@ -51,8 +228,14 @@ struct LoadedMesh
 {
     bgfx::VertexBufferHandle vbh{BGFX_INVALID_HANDLE};
     bgfx::IndexBufferHandle ibh{BGFX_INVALID_HANDLE};
-    bgfx::TextureHandle tex{BGFX_INVALID_HANDLE};
-    float model[16]{};
+    bgfx::TextureHandle tex{BGFX_INVALID_HANDLE}; // 兼容旧路径
+    PbrMatHandle material{};                      // PBR 材质句柄
+    uint32_t indexCount{0};                       // 索引数(统计用)
+    float model[16]{};                            // 模型矩阵(M)
+
+    // 物体空间AABB（加载时计算）
+    float bmin[3]{0.0f, 0.0f, 0.0f};
+    float bmax[3]{0.0f, 0.0f, 0.0f};
 };
 
 // 渲染器内部缓存（兼容层，不侵入你的 Scene）
@@ -398,10 +581,9 @@ bool Renderer::loadTextureFromFile(const std::string &path)
 // ========== glTF → Renderer 内部缓存 ==========
 bool Renderer::loadMeshFromGltf(const std::string &path)
 {
-    // 直接按 glTF -> VB/IB/纹理 -> push 到 s_loadedMeshes 的流程做
+    // 同上：无 Scene 引用，直接加载到内部缓存
     MeshData md;
-    std::string baseColorPath;
-    std::string normalPath;
+    std::string baseColorPath, normalPath;
     if (!loadGltfMesh(path, md, &baseColorPath, &normalPath))
     {
         spdlog::error("[Renderer] glTF load failed: {}", path);
@@ -413,9 +595,8 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
         return false;
     }
 
-    // 顶点布局：与 vs_mesh/fs_mesh 对齐（pos/normal/uv）
-    bgfx::VertexLayout gltfLayout;
-    gltfLayout.begin()
+    bgfx::VertexLayout layout;
+    layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
@@ -423,7 +604,7 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
 
     const uint32_t vsize = static_cast<uint32_t>(md.vertices.size() * sizeof(MeshVertex));
     const bgfx::Memory *vm = bgfx::copy(md.vertices.data(), vsize);
-    bgfx::VertexBufferHandle vbh = bgfx::createVertexBuffer(vm, gltfLayout);
+    bgfx::VertexBufferHandle vbh = bgfx::createVertexBuffer(vm, layout);
 
     const uint32_t isize = static_cast<uint32_t>(md.indices.size() * sizeof(uint16_t));
     const bgfx::Memory *im = bgfx::copy(md.indices.data(), isize);
@@ -435,29 +616,56 @@ bool Renderer::loadMeshFromGltf(const std::string &path)
         return false;
     }
 
-    // 贴图（没有就用棋盘格兜底）
-    bgfx::TextureHandle tex = BGFX_INVALID_HANDLE;
-    if (!baseColorPath.empty())
-        tex = resCache_.getTexture2D(baseColorPath, /*flipY=*/true);
-    if (!bgfx::isValid(tex))
-        tex = texDemo_;
+    // AABB
+    float bmin[3] = {+FLT_MAX, +FLT_MAX, +FLT_MAX};
+    float bmax[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (size_t i = 0; i < md.vertices.size(); ++i)
+    {
+        const float *p = reinterpret_cast<const float *>(&md.vertices[i]);
+        bmin[0] = std::min(bmin[0], p[0]);
+        bmax[0] = std::max(bmax[0], p[0]);
+        bmin[1] = std::min(bmin[1], p[1]);
+        bmax[1] = std::max(bmax[1], p[1]);
+        bmin[2] = std::min(bmin[2], p[2]);
+        bmax[2] = std::max(bmax[2], p[2]);
+    }
+
+    PbrMaterialDesc mdesc{};
+    mdesc.baseColorFactor = {1.0f, 1.0f, 1.0f, 1.0f};
+    mdesc.metallic = 0.0f;
+    mdesc.roughness = 0.9f;
+    mdesc.emissive = {0.0f, 0.0f, 0.0f};
+    mdesc.texBaseColor = baseColorPath;
+    mdesc.texNormal = normalPath;
+    mdesc.twoSided = true;
+
+    PbrMatHandle mat = createPbrMaterial(mdesc);
 
     LoadedMesh lm;
     lm.vbh = vbh;
     lm.ibh = ibh;
-    lm.tex = tex;
+    lm.material = mat;
+    lm.indexCount = static_cast<uint32_t>(md.indices.size());
     bx::mtxIdentity(lm.model);
+    lm.bmin[0] = bmin[0];
+    lm.bmin[1] = bmin[1];
+    lm.bmin[2] = bmin[2];
+    lm.bmax[0] = bmax[0];
+    lm.bmax[1] = bmax[1];
+    lm.bmax[2] = bmax[2];
+
     s_loadedMeshes.push_back(lm);
 
-    spdlog::info("[Renderer] loadMeshFromGltf OK: vtx={}, idx={}, baseTex='{}'",
+    spdlog::info("[Renderer] loadMeshFromGltf OK: vtx={}, idx={}, base='{}' norm='{}'",
                  static_cast<uint32_t>(md.vertices.size()),
                  static_cast<uint32_t>(md.indices.size()),
-                 baseColorPath);
+                 baseColorPath, normalPath);
     return true;
 }
 
-bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &)
+bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene & /*unused*/)
 {
+    // 1) 载入 glTF 网格（仅 baseColor、normal 两条路径）
     MeshData md;
     std::string baseColorPath;
     std::string normalPath;
@@ -472,18 +680,17 @@ bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &)
         return false;
     }
 
-    // 顶点布局：与 vs_mesh/fs_mesh 对齐（pos/normal/uv）
-    bgfx::VertexLayout gltfLayout;
-    gltfLayout.begin()
+    // 2) 顶点布局：pos/normal/uv
+    bgfx::VertexLayout layout;
+    layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
         .end();
 
-    // 顶点/索引上传（注意 const 变量一次性初始化，并给 bgfx::copy 传入 size）
     const uint32_t vsize = static_cast<uint32_t>(md.vertices.size() * sizeof(MeshVertex));
     const bgfx::Memory *vm = bgfx::copy(md.vertices.data(), vsize);
-    bgfx::VertexBufferHandle vbh = bgfx::createVertexBuffer(vm, gltfLayout);
+    bgfx::VertexBufferHandle vbh = bgfx::createVertexBuffer(vm, layout);
 
     const uint32_t isize = static_cast<uint32_t>(md.indices.size() * sizeof(uint16_t));
     const bgfx::Memory *im = bgfx::copy(md.indices.data(), isize);
@@ -495,25 +702,52 @@ bool Renderer::addMeshFromGltfToScene(const std::string &path, Scene &)
         return false;
     }
 
-    // 贴图（没有就用棋盘格兜底）
-    bgfx::TextureHandle tex = BGFX_INVALID_HANDLE;
-    if (!baseColorPath.empty())
-        tex = resCache_.getTexture2D(baseColorPath, /*flipY=*/true);
-    if (!bgfx::isValid(tex))
-        tex = texDemo_;
+    // 3) 计算物体空间AABB（假设 position 在 MeshVertex 的最前 3 个 float）
+    float bmin[3] = {+FLT_MAX, +FLT_MAX, +FLT_MAX};
+    float bmax[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (size_t i = 0; i < md.vertices.size(); ++i)
+    {
+        const float *p = reinterpret_cast<const float *>(&md.vertices[i]); // pos 在前3个float
+        bmin[0] = std::min(bmin[0], p[0]);
+        bmax[0] = std::max(bmax[0], p[0]);
+        bmin[1] = std::min(bmin[1], p[1]);
+        bmax[1] = std::max(bmax[1], p[1]);
+        bmin[2] = std::min(bmin[2], p[2]);
+        bmax[2] = std::max(bmax[2], p[2]);
+    }
 
-    // 缓存到兼容层，renderScene/后续 PBR 用
+    // 4) 组装 PBR 材质（BaseColor sRGB；Normal 线性）
+    PbrMaterialDesc mdesc{};
+    mdesc.baseColorFactor = {1.0f, 1.0f, 1.0f, 1.0f};
+    mdesc.metallic = 0.0f;
+    mdesc.roughness = 0.9f;
+    mdesc.emissive = {0.0f, 0.0f, 0.0f};
+    mdesc.texBaseColor = baseColorPath; // sRGB
+    mdesc.texNormal = normalPath;       // Linear
+    mdesc.twoSided = true;
+
+    PbrMatHandle mat = createPbrMaterial(mdesc);
+
+    // 5) 缓存
     LoadedMesh lm;
     lm.vbh = vbh;
     lm.ibh = ibh;
-    lm.tex = tex;
+    lm.material = mat;
+    lm.indexCount = static_cast<uint32_t>(md.indices.size());
     bx::mtxIdentity(lm.model);
+    lm.bmin[0] = bmin[0];
+    lm.bmin[1] = bmin[1];
+    lm.bmin[2] = bmin[2];
+    lm.bmax[0] = bmax[0];
+    lm.bmax[1] = bmax[1];
+    lm.bmax[2] = bmax[2];
+
     s_loadedMeshes.push_back(lm);
 
-    spdlog::info("[Renderer] addMeshFromGltfToScene OK: vtx={}, idx={}, baseTex='{}'",
+    spdlog::info("[Renderer] addMeshFromGltfToScene OK: vtx={}, idx={}, base='{}' norm='{}'",
                  static_cast<uint32_t>(md.vertices.size()),
                  static_cast<uint32_t>(md.indices.size()),
-                 baseColorPath);
+                 baseColorPath, normalPath);
     return true;
 }
 
@@ -522,72 +756,70 @@ void Renderer::renderScene(const Scene &, Camera &)
 {
     float view[16], proj[16];
 
-    // 1) 相机（由 App.cpp 的 OrbitController 每帧写入）
+    // 1) 相机（Orbit）与投影
     {
         const bx::Vec3 eye = {ke::g_orbitView.eye[0], ke::g_orbitView.eye[1], ke::g_orbitView.eye[2]};
         const bx::Vec3 at = {ke::g_orbitView.at[0], ke::g_orbitView.at[1], ke::g_orbitView.at[2]};
         const bx::Vec3 up = {ke::g_orbitView.up[0], ke::g_orbitView.up[1], ke::g_orbitView.up[2]};
-
         bx::mtxLookAt(view, eye, at, up);
-
-        const float aspect = (height_ > 0) ? (float)width_ / (float)height_ : 1.0f;
+        const float aspect = (height_ > 0) ? float(width_) / float(height_) : 1.0f;
         bx::mtxProj(proj, 60.0f, aspect, 0.1f, 100.0f, bgfx::getCaps()->homogeneousDepth);
         bgfx::setViewTransform(viewId_, view, proj);
+        setViewPos(eye.x, eye.y, eye.z);
     }
 
-    // 确保本视图即使没有 drawcall 也会被认为“活跃”
     bgfx::touch(viewId_);
 
-    // 2) Uniform（惰性创建）
+    // 2) 光照 uniform
     static bgfx::UniformHandle u_lightDir = BGFX_INVALID_HANDLE;
     static bgfx::UniformHandle u_pointPosRad = BGFX_INVALID_HANDLE;
     static bgfx::UniformHandle u_pointColInt = BGFX_INVALID_HANDLE;
-    static bgfx::UniformHandle s_texColor = BGFX_INVALID_HANDLE;
-
     if (!bgfx::isValid(u_lightDir))
         u_lightDir = bgfx::createUniform("u_lightDir", bgfx::UniformType::Vec4);
     if (!bgfx::isValid(u_pointPosRad))
         u_pointPosRad = bgfx::createUniform("u_pointPosRad", bgfx::UniformType::Vec4);
     if (!bgfx::isValid(u_pointColInt))
         u_pointColInt = bgfx::createUniform("u_pointColInt", bgfx::UniformType::Vec4);
-    if (!bgfx::isValid(s_texColor))
-        s_texColor = bgfx::createUniform("s_texColor", bgfx::UniformType::Sampler);
 
-    // 光照参数上传（你的 ForwardPBR::Lighting 里已有这些字段）
     bgfx::setUniform(u_lightDir, &pbr_.lighting().lightDir_ambient, 1);
     bgfx::setUniform(u_pointPosRad, &pbr_.lighting().pointPos_radius, 1);
     bgfx::setUniform(u_pointColInt, &pbr_.lighting().pointCol_intensity, 1);
 
-    // 3) 渲染状态：双面渲染，避免薄片在旋转时“突然消失”
-    static const uint64_t kStateScene =
-        BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
-        BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS; // 不带 CULL_*
+    // 3) Grid（可选保留）
+    if (bgfx::isValid(programSimple_))
+        drawDebugGrid_(viewId_, programSimple_, 10, 0.5f, 0.0f, 5, 0x40FFFFFF, 0x80FFFFFF);
 
-    // 4) 提交缓存的网格
-    uint32_t draws = 0;
+    // 4) 视锥裁剪：PV = P * V
+    float pv[16];
+    bx::mtxMul(pv, proj, view);
+    const bool hd = bgfx::getCaps()->homogeneousDepth;
+
+    // 5) 提交可见网格（走 PBR）
+    uint32_t draws = 0, tris = 0, culled = 0;
     for (const auto &m : s_loadedMeshes)
     {
-        if (!bgfx::isValid(m.vbh) || !bgfx::isValid(m.ibh) || !bgfx::isValid(programMesh_))
+        if (!bgfx::isValid(m.vbh) || !bgfx::isValid(m.ibh))
             continue;
 
-        bgfx::setTransform(m.model);
-        bgfx::setVertexBuffer(0, m.vbh);
-        bgfx::setIndexBuffer(m.ibh);
-        if (bgfx::isValid(m.tex))
-            bgfx::setTexture(0, s_texColor, m.tex);
+        // 裁剪测试
+        if (!aabbVisible_(pv, m.model, m.bmin, m.bmax, hd))
+        {
+            ++culled;
+            continue;
+        }
 
-        bgfx::setState(kStateScene);
-        bgfx::submit(viewId_, programMesh_);
+        drawMeshPBR(m.model, m.vbh, m.ibh, m.material, viewId_);
         ++draws;
+        tris += m.indexCount / 3;
     }
 
-    // 5) HUD（使用 showHelp_ 开关；与现有 HUD 风格兼容）
+    // 6) HUD
     if (showHelp_)
     {
         const auto &L = pbr_.lighting();
         bgfx::dbgTextClear();
-        bgfx::dbgTextPrintf(0, 0, 0x0f, "Path: Scene");
-        bgfx::dbgTextPrintf(0, 1, 0x0f, "Draws: %u", draws);
+        bgfx::dbgTextPrintf(0, 0, 0x0f, "Path: Scene (PBR + Culling)");
+        bgfx::dbgTextPrintf(0, 1, 0x0f, "Draws: %u  Tris: %u  Culled: %u", draws, tris, culled);
         bgfx::dbgTextPrintf(0, 2, 0x0f, "Eye: (%.2f, %.2f, %.2f)",
                             ke::g_orbitView.eye[0], ke::g_orbitView.eye[1], ke::g_orbitView.eye[2]);
         bgfx::dbgTextPrintf(0, 3, 0x0f, "DirL: (%.2f, %.2f, %.2f)  amb=%.2f",
@@ -598,11 +830,9 @@ void Renderer::renderScene(const Scene &, Camera &)
                             L.pointPos_radius.x, L.pointPos_radius.y, L.pointPos_radius.z, L.pointPos_radius.w,
                             L.pointCol_intensity.w);
         bgfx::dbgTextPrintf(0, 5, 0x0f, "Exposure: %.2f", L.viewPos_exposure.w);
-        bgfx::dbgTextPrintf(0, 7, 0x0a, "[G] toggle point light   [I/K/J/L/U/O] move point light   [ [ / ] ] exposure");
-        bgfx::dbgTextPrintf(0, 8, 0x0a, "[F3] wireframe   [F6] cull toggle (如果你实现了)");
     }
 
-    // 6) 结束本帧
+    // 7) 结束
     bgfx::frame();
 }
 
