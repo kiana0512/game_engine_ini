@@ -1,108 +1,223 @@
-# K-Engine 开发日志 - Day 3 总结
+# K-ENGINE
 
-## 🎯 Day 3 学习目标
-1. **Scene/组件层**  
-   - 实现最小的场景容器，可以挂载网格、相机。
-2. **Material/渲染管线**  
-   - 把贴图/光照等状态从 Renderer 内部分离，进入材质管理。
-3. **相机控制器**  
-   - 支持 WASD 移动、Shift 冲刺、Space/C 上下、右键拖拽旋转。
-4. **资源管理**  
-   - 最小缓存机制，避免重复加载 Texture/Mesh。
-5. **输入映射**  
-   - 将 SDL 输入抽象成 Action，便于未来扩展（手柄/配置文件）。
+一个用 **SDL2 + bgfx** 搭建的学习型渲染/游戏引擎，目标：**结构清晰、可插拔、易拓展**。  
+当前默认渲染路径是 **前向 PBR**，并在不破坏现有效果的前提下逐步引入 **Pass 管线** 来瘦身 `Renderer.cpp`。
+
+> 最近一次更新：2025-10-21
 
 ---
 
-## 📂 新增/修改的文件结构
+## 目录结构（精简版）
+
+```
 src/
-├── core/
-│ ├── App.cpp / App.h # 主循环 + 事件处理
-├── gfx/
-│ ├── Renderer.cpp / Renderer.h # bgfx 渲染器，支持直绘与 Scene
-│ ├── Material.cpp / Material.h # 材质封装（状态/贴图）
-│ ├── GltfLoader.cpp / GltfLoader.h# glTF 模型加载
-├── scene/
-│ ├── Scene.cpp / Scene.h # 场景容器 + MeshComp
-│ ├── CameraController.cpp / .h # 相机控制器 (WASD + 鼠标)
-│ ├── Input.cpp / Input.h # 输入抽象 (ActionMap)
+  core/
+    App.{h,cpp}
+    FrameTimer.{h,cpp}
+  gfx/
+    camera/                 # 相机与控制器
+      Camera.h
+    culling/
+    lighting/
+      Lighting.h
+    material/
+      PbrMaterial.{h,cpp}
+    memory/
+      ScopeExit.h
+    pipeline/               # Pass 抽象与实例（进行中）
+      RenderPass.h
+      ClearPass.{h,cpp}
+      ForwardPBRPass.{h,cpp}
+      # LegacyScenePass.{h,cpp}  ← 可选适配旧逻辑（如需要）
+    resource/
+      ResourceCache.{h,cpp}
+    shaders/
+      shader_utils.{h,cpp}
+    texture/
+      TextureLoader.{h,cpp}
+    Renderer.{h,cpp}        # 仍偏“胖”，正在按 Pass 拆分
+  io/
+    gltf/Exporter.{h,cpp}
+shaders/
+  vs_pbr.sc  fs_pbr.sc
+  vs_mesh.sc fs_mesh.sc
+  fs_simple.sc fs_tex.sc
+  varying.def.sc
+CMakePresets.json
+CMakeLists.txt
+```
 
 ---
 
-## 🖥️ 功能达成情况
+## 快速开始
 
-### 1. 场景层
-- `Scene` 支持多个 `MeshComp`，每个包含：
-  - VB/IB
-  - 可选 BaseColor 贴图
-  - 模型矩阵
-- `Renderer::renderScene(scene, camera)` 遍历所有网格绘制。
+> 需要：CMake ≥ 3.25、Visual Studio 2022（或等效工具链）。  
+> 子模块（bgfx/bx/bimg 等）在配置时会拉取或由脚本生成。
 
-### 2. 渲染管线
-- 三套 shader 管线：
-  - `progColor_` → 纯顶点色
-  - `progTex_` → 纹理采样
-  - `programMesh_` → 网格 + 法线 + UV
-- `uSampler_` 统一采样贴图，支持 PNG / 棋盘格 / glTF BaseColor。
+```bash
+# 克隆仓库并初始化子模块
+git clone <your-repo>.git
+cd K-ENGINE
+git submodule update --init --recursive
 
-### 3. 相机控制器
-- WASD 移动，Shift 冲刺，Space 上升，C 下降。
-- 鼠标右键拖拽旋转相机。
-- 限制 Pitch 防止相机翻转。
-- Camera 每帧更新 view/proj 并传入 bgfx。
+# 生成 + 构建（Windows VS2022 预设）
+cmake --preset vs2022-x64
+cmake --build --preset vs2022-x64 -j
+```
 
-### 4. 资源管理
-- Texture → 自动加载或 fallback 棋盘格。
-- Mesh → glTF 加载后生成一次 VB/IB 并交给 bgfx。
-- 资源使用统一 layout，避免重复创建。
-
-### 5. 输入映射
-- 将 SDL 事件翻译为动作：
-  - `MoveForward/Back/Left/Right`
-  - `MoveUp/Down`
-  - `Sprint`
-  - `CameraRotate`
-- 结构支持后续扩展（手柄/配置文件）。
+运行可执行文件（路径以 `CMakePresets.json` 的构建产物为准）。
 
 ---
 
-## ⌨️ 热键一览
-- `R` → 热重载 Shader
-- `F1/F2/F3` → Debug 面板切换
-- `H` → 显隐帮助
-- `1 / 2` → 三角形 / 四边形
-- `3` → Mesh 模式 (Scene 渲染)
-- `O / P` → 正交 / 透视相机
-- `T` → 开关贴图
-- `L` → 重新加载 `docs/image.png`
-- `M` → 加载 `docs/models/model.gltf` 到场景
+## 已完成功能（阶段性回顾）
+
+- **基础框架**
+  - SDL2 + bgfx 初始化；`App`/`Renderer` 职责分离；`FrameTimer` 统计帧时间。
+  - 资源：`ResourceCache` 缓存、`TextureLoader` 加载、`shader_utils` 着色器装载。
+
+- **相机与交互**
+  - `Camera`：支持 Ortho / Perspective；可外部注入矩阵（`setView/setProj`）；**已提供** `viewPtr()` / `projPtr()` 只读指针。
+  - `CameraController`：自由相机（右键旋转 + WASD/空格/C 平移 + Shift 冲刺）；**已提供** `GetPosition()`。
+  - `OrbitController`：轨道相机，便于展示/调试。
+
+- **场景/几何**
+  - 网格加载与缓存（VB/IB/AABB）；支持 glTF 导出工具（`io/gltf`）。
+  - 视锥裁剪：CPU 侧 AABB × PV 矩阵（支持齐次深度）。
+
+- **渲染（前向 PBR）**
+  - `PbrMaterial` + `ForwardPBR` 技术路径：BaseColor、MetallicRoughness、（可接）Normal；sRGB→线性→输出伽马。
+  - 灯光：方向光 + 点光参数；能量守恒与 Lambert 校正已修正。
+  - 调试：地网、HUD（dbgText）可开关。
+
+- **Pass 架构（引入中）**
+  - `pipeline/RenderPass.h` 定义统一接口；已有 `ClearPass`、`ForwardPBRPass` 骨架。
+  - `RenderContext` 以**纯数据**（view/proj 指针、camPos、time、drawList 预留）传递，**解耦** Pass 与 Camera/Controller 的成员接口。
 
 ---
 
-## 🧩 当前引擎具备的能力
-- 有了 **场景层** (Scene) 与 **渲染器** (Renderer) 的协作。
-- 支持 **多种绘制模式**：直绘三角/四边形、glTF 网格。
-- 有了 **相机控制器**，能像 Unity 编辑器一样飞行视角。
-- 输入抽象为 Action，后续能接手柄/键位映射。
-- 材质/贴图/网格已开始解耦。
+## 当前渲染路径
+
+### 旧路径（默认，稳定）
+在 `Renderer.cpp` 中顺序完成：清屏 → 设置灯光 Uniform → 视锥裁剪 → 调用 `ForwardPBR` 技术提交 → 调试地网/HUD。  
+优点：直观、集中；缺点：文件偏“胖”，后续维护成本上升。
+
+### 新路径（进行中：Pass 管线）
+- **Pass 是什么？**  
+  “在一个 bgfx View 上、以固定顺序做一件渲染事”的**最小调度单元**。  
+  Renderer 负责编排：  
+  `buildDrawList → sort → for pass in pipeline: pass.prepare(rc); pass.execute(rc);`
+- **已有/计划的 Pass**  
+  - `ClearPass`：清屏/触发视图。  
+  - `ForwardPBRPass`：消费 `DrawList` 做前向 PBR（内部复用现有 `ForwardPBR` “技术层”）。  
+  - （可选）`LegacyScenePass`：把旧渲染逻辑适配成一个 Pass，便于平滑过渡。  
+  - 未来：`DebugGridPass`、`ImGuiPass`、`ShadowMapPass`、`IBLPass`、`GBufferPass` 等。
+- **Renderer 的终态**  
+  只做“数据准备 + Pass 调度”，不再直接 `setTexture/submit`。
 
 ---
 
-## 🔜 Day 4 展望
-下一步计划：
-1. **组件扩展**  
-   - 为 `MeshComp` 加 transform（平移/旋转/缩放）。
-   - 支持多个相机 / 光源。
-2. **光照入门**  
-   - 在 `vs_mesh/fs_mesh` 中加入简单 Lambert 漫反射。
-3. **资源管理进阶**  
-   - 引入资源缓存，避免重复加载贴图/网格。
-4. **HUD 扩展**  
-   - 在 HUD 中显示 FPS、相机位置等 debug 信息。
+## 相机与控制细节
+
+- **Camera**  
+  - `setViewport(w,h)` 更新投影宽高比；`setView()/setProj()` 可由外部注入矩阵；  
+  - `viewPtr()/projPtr()` 提供 4×4 列主序矩阵指针（给 bgfx `setViewTransform`/Pass 使用）。
+
+- **CameraController（自由相机）**  
+  - 组合键：右键旋转；WASD 平移；空格上升/C 下降；Shift 冲刺；  
+  - `SetPose(pos,yaw,pitch)` 设置初始姿态；`GetPosition()` 用于渲染 Uniform（`u_CamPos_Time`）。
+
+- **OrbitController（轨道）**  
+  - 围绕目标点旋转与缩放；演示模型时更友好。
 
 ---
 
-📌 **总结**  
-Day 3 阶段我们完成了：场景容器、材质封装、相机控制、输入抽象、资源加载。  
-现在引擎已经进入一个“小型引擎”的雏形，可以加载 glTF 模型并通过相机自由浏览。  
-下一步 Day 4 我们将进入 **光照 & 组件扩展**，让画面更有真实感。
+## PBR 材质（Metallic–Roughness 工作流）
+
+- **纹理采样约定**
+  - BaseColor：**sRGB** 取样 → 转线性；  
+  - MetallicRoughness：**线性** 取样（R=Metallic，G=Roughness）；  
+  - Normal：线性取样（后续将完善切线空间 TBN）。
+- **核心 Uniform/Sampler**
+  - `u_BaseColor`（`vec4`，xyz 有效）；  
+  - `u_MetallicRoughness`（`vec4`，xy 有效）；  
+  - `u_CamPos_Time`（`vec4`，xyz=相机位置，w=时间）；  
+  - `s_BaseColor` / `s_Normal` / `s_MR`（sampler2D）。
+- **光照参数**
+  - 方向光：`u_lightDir`（xyz 方向，w 环境强度）；  
+  - 点光：`u_pointPosRad`（xyz 位置，w 半径），`u_pointColInt`（rgb 颜色，w 强度）。
+
+---
+
+## 视锥裁剪（CPU）
+
+- 计算 `PV = P * V`；将 AABB 变换到世界后测试。  
+- bgfx 能力集中 `homogeneousDepth` 为真时，深度范围为 `[-1,1]`（齐次深度）；否则为 `[0,1]`。  
+- 只提交命中的网格，HUD 输出 `draws/tris/culled` 统计。
+
+---
+
+## 近期路线图（Roadmap）
+
+### Sprint A：让 Renderer “有规矩”
+- [ ] `Renderer::buildDrawList()`：把 `s_loadedMeshes` 转为 `DrawItem`（VB/IB/Model/Texture/State）。  
+- [ ] `Renderer::sortDrawList()`：按 `DrawKey { pipeline(8b), material(24b), depth(32b) }` 排序。  
+- [ ] `ForwardPBRPass` 消费 `drawList`，内部复用现有 `ForwardPBR` 实现。  
+- [ ] 主循环改为：`ClearPass → ForwardPBRPass`（效果不变，结构清晰）。
+
+### Sprint B：质量提升（不改外部接口）
+- [ ] `shaders/include/common.sc`：sRGB 工具、GGX/Smith、Fresnel、TBN/法线解码。  
+- [ ] Tangent 生成（MikkTSpace 或导入）；法线贴图完全正确。  
+- [ ] Debug 视图（法线/MR/UV/深度）。  
+- [ ] 统一 UBO 频率：Per-Frame / Per-Material / Per-Object。
+
+### Sprint C：进阶特性
+- [ ] IBL：BRDF LUT、Irradiance、Prefiltered Specular（先加载预烘焙 KTX）。  
+- [ ] 阴影：ShadowMap → PCF → CSM。  
+- [ ] ImGuiPass：可视化调节灯光/材质/相机参数。
+
+---
+
+## C++ 风格约定
+
+- **RAII**：拥有 GPU 资源的类禁拷贝（`=delete`），析构里 `bgfx::destroy`。  
+- **const-correctness**：能 `const` 就 `const`；参数优先 `const&`。  
+- **noexcept**：纯工具/不抛异常的成员标 `noexcept`。  
+- **位域 + 联合体**：`DrawKey` 64 位排序键，cache 友好。  
+- **最小 include**：头文件多用前向声明，`.cpp` 再包含实现头。
+
+---
+
+## 常见问题（Troubleshooting）
+
+- **error C2039: “position” 不是 “Camera” 的成员**  
+  不要在 Pass 里直接访问 `Camera` 成员；通过 `RenderContext` 传入 `viewPtr()/projPtr()` 与 `CameraController::GetPosition()`。  
+  （本仓库已提供这些接口）
+
+- **颜色不对/发灰**  
+  BaseColor 需以 **sRGB** 采样并转线性；MetallicRoughness/Normal 必须线性采样；输出前做伽马/色调映射。
+
+- **裁剪过度/画面消失**  
+  确认 `PV = P * V` 顺序；AABB 需先乘 `model` 后再测试；检查 `homogeneousDepth` 分支。
+
+---
+
+## 提交规范
+
+- 示例：`feat(pipeline): add ForwardPBRPass skeleton`  
+- PR 请附：动机、前后截图、性能/编译耗时变化。
+
+---
+
+## 变更日志
+
+**2025-10-21**  
+- Camera 增加 `viewPtr()/projPtr()`；CameraController 增加 `GetPosition()`。  
+- 引入 `pipeline/`：`RenderPass.h`、`ClearPass`、`ForwardPBRPass`（准备接管提交）。  
+- `ForwardPBRPass` 改为吃 `RenderContext` 纯数据（不再依赖 Camera 成员名）。  
+- 文档重构：本 README 替换旧的 Day4/Day5 文档。
+
+---
+
+## 许可
+
+本项目用于学习与研究；如需商用/二次分发，请自行评估并补充相应许可证。
